@@ -47,6 +47,6 @@ jobs:
 
     - name: Run test
       run: |
-        ./target/release/client --test_receiver &
+        ./target/release/client --test-receiver &
         sleep 1
-        ./target/release/client t --test_sender
+        ./target/release/client t --test-sender
