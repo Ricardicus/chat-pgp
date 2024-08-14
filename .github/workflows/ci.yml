@@ -47,7 +47,6 @@ jobs:
 
     - name: Run test
       run: |
-        ls -al .
-        ./build/release/client --test_receiver &
+        ./target/release/client --test_receiver &
         sleep 1
-        ./build/release/client t --test_sender
+        ./target/release/client t --test_sender
