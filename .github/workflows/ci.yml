@@ -3,10 +3,10 @@ name: Rust CI
 on:
   push:
     branches:
-      - main
+      - master 
   pull_request:
     branches:
-      - main
+      - master
 
 jobs:
   build:
@@ -46,4 +46,4 @@ jobs:
       run: |
         ./build/release/client --test_receiver &
         sleep 1
-        ./build/release/client --test_sender
+        ./build/release/client t --test_sender
