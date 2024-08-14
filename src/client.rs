@@ -54,6 +54,10 @@ struct Cli {
     #[clap(long)]
     #[arg(default_value = "false")]
     test_sender: bool,
+
+    #[clap(short, long)]
+    #[arg(default_value = "zenoh/config.json5")]
+    zenoh_config: String,
 }
 
 #[tokio::main]
@@ -66,6 +70,7 @@ async fn main() {
     let sub = cli.sub;
     let test_sender = cli.test_sender;
     let test_receiver = cli.test_receiver;
+    let zenoh_config = cli.zenoh_config;
 
     if gpgkey.len() > 0 {
         let mut cert = None;
@@ -100,7 +105,9 @@ async fn main() {
         let pgp_handler = PGPEnDeCrypt::new(&cert, &passphrase);
         let pub_key_fingerprint = pgp_handler.get_public_key_fingerprint();
 
-        let mut session = Session::new(pgp_handler);
+        let mut session = Session::new(pgp_handler, zenoh_config.clone());
+
+        let zenoh_config = Config::from_file(zenoh_config).unwrap();
 
         if test_receiver {
             println!("-- Testing initiailize session [receiver]");
@@ -116,7 +123,7 @@ async fn main() {
             let timeout_discovery = Duration::from_secs(5);
 
             let zenoh_session =
-                Arc::new(Mutex::new(zenoh::open(config::peer()).res().await.unwrap()));
+                Arc::new(Mutex::new(zenoh::open(zenoh_config).res().await.unwrap()));
             let handler = ZenohHandler::new(zenoh_session);
             let mut cont = true;
             let mut attempts = 0;
@@ -190,7 +197,7 @@ async fn main() {
             let timeout_discovery = Duration::from_secs(5);
 
             let zenoh_session =
-                Arc::new(Mutex::new(zenoh::open(config::peer()).res().await.unwrap()));
+                Arc::new(Mutex::new(zenoh::open(zenoh_config).res().await.unwrap()));
             let handler = ZenohHandler::new(zenoh_session);
             let mut cont = true;
             let mut attempts = 0;

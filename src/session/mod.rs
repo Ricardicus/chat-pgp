@@ -73,16 +73,19 @@ where
     pub host_encro: Arc<Mutex<HostCrypto>>,
     pub tx: mpsc::Sender<(String, String)>,
     pub rx: mpsc::Receiver<(String, String)>,
+
+    pub middleware_config: String,
 }
 
 impl<'a> Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt<'a>> {
-    pub fn new(host_encro: PGPEnDeCrypt<'a>) -> Self {
+    pub fn new(host_encro: PGPEnDeCrypt<'a>, middleware_config: String) -> Self {
         let (tx, mut rx) = mpsc::channel(100);
         Session {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             host_encro: Arc::new(Mutex::new(host_encro)),
             tx,
             rx,
+            middleware_config,
         }
     }
 
@@ -162,8 +165,9 @@ impl<'a> Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt<'a>> {
         let mut topic = Topic::Initialize.as_str().to_string();
         topic.push_str("/");
         topic.push_str(&cert.fingerprint().to_string());
-
-        let zenoh_session = Arc::new(Mutex::new(zenoh::open(config::peer()).res().await.unwrap()));
+        let zc = self.middleware_config.clone();
+        let zenoh_config = Config::from_file(zc).unwrap();
+        let zenoh_session = Arc::new(Mutex::new(zenoh::open(zenoh_config).res().await.unwrap()));
         let handler = ZenohHandler::new(zenoh_session);
 
         let await_response_interval = Duration::from_secs(5);
@@ -276,10 +280,12 @@ impl<'a> Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt<'a>> {
         for topic in topics {
             let tx_clone = tx.clone();
             let t = topic.clone();
+            let zc = self.middleware_config.clone();
 
             let h = tokio::spawn(async move {
+                let zenoh_config = Config::from_file(zc).unwrap();
                 let zenoh_session =
-                    Arc::new(Mutex::new(zenoh::open(config::peer()).res().await.unwrap()));
+                    Arc::new(Mutex::new(zenoh::open(zenoh_config).res().await.unwrap()));
                 let handler = ZenohHandler::new(zenoh_session);
                 let mut keep_alive = true;
                 while keep_alive {
@@ -316,8 +322,10 @@ impl<'a> Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt<'a>> {
         self.serve_topics(topics_to_subscribe, &tx_clone, false)
             .await;
 
+        let zc = self.middleware_config.clone();
+        let zenoh_config = Config::from_file(zc).unwrap();
         let zenoh_session_responder =
-            Arc::new(Mutex::new(zenoh::open(config::peer()).res().await.unwrap()));
+            Arc::new(Mutex::new(zenoh::open(zenoh_config).res().await.unwrap()));
         let responder = ZenohHandler::new(zenoh_session_responder);
 
         while let Some(received) = self.rx.recv().await {
@@ -408,9 +416,10 @@ impl<'a> Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt<'a>> {
         let tx_clone = self.tx.clone();
         self.serve_topics(topics_to_subscribe, &tx_clone, false)
             .await;
-
+        let zc = self.middleware_config.clone();
+        let zenoh_config = Config::from_file(zc).unwrap();
         let zenoh_session_responder =
-            Arc::new(Mutex::new(zenoh::open(config::peer()).res().await.unwrap()));
+            Arc::new(Mutex::new(zenoh::open(zenoh_config).res().await.unwrap()));
         let responder = ZenohHandler::new(zenoh_session_responder);
 
         while let Some(received) = self.rx.recv().await {
@@ -481,9 +490,10 @@ impl<'a> Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt<'a>> {
         let tx_clone = self.tx.clone();
         self.serve_topics(topics_to_subscribe, &tx_clone, false)
             .await;
-
+        let zc = self.middleware_config.clone();
+        let zenoh_config = Config::from_file(zc).unwrap();
         let zenoh_session_responder =
-            Arc::new(Mutex::new(zenoh::open(config::peer()).res().await.unwrap()));
+            Arc::new(Mutex::new(zenoh::open(zenoh_config).res().await.unwrap()));
         let responder = ZenohHandler::new(zenoh_session_responder);
 
         let mut msg_count = 0;
