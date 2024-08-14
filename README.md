@@ -4,8 +4,8 @@ Welcome to PGP chat. This in a encrypted chat platform based on [PGP](https://en
 
 ## Encryption
 
-You session is encrypted using ChaCha20Poly1305 with a 
-session key that is protected with PGP key assymetrical
+Each chat session is encrypted using a symmectrical ChaCha20Poly1305 algorithm
+with a shared secret session key that is protected with PGP key assymetrical
 encryption.
 
 ## Communication
