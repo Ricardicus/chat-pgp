@@ -22,4 +22,5 @@ This is a work in progress. So far I have this:
 Will work on this:
 
 - Web front end + API:ification of the Rust backend.
+- Better terminal interface
 
