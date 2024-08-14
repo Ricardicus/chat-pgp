@@ -1,12 +1,16 @@
 # PGP Chat
 
-Chat encrypted with PGP with anyone else.
+Welcome to PGP chat. This in a encrypted chat platform based on [PGP](https://en.wikipedia.org/wiki/Pretty_Good_Privacy).
 
 ## Encryption
 
 You session is encrypted using ChaCha20Poly1305 with a 
 session key that is protected with PGP key assymetrical
 encryption.
+
+## Communication
+
+The communication protocol is built on [Zenoh](https://github.com/eclipse-zenoh/zenoh).
 
 ## Work in progress
 
