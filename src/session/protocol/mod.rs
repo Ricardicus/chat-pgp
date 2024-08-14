@@ -4,6 +4,7 @@ pub enum Topic {
     Initialize,
     Discover,
     Message,
+    Internal,
 }
 
 impl Topic {
@@ -13,6 +14,7 @@ impl Topic {
             Topic::Initialize => "session/initialize",
             Topic::Discover => "session/discover",
             Topic::Message => "session/message",
+            Topic::Internal => "internal",
         }
     }
     pub fn as_reply(&self) -> String {

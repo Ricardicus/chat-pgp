@@ -1,60 +1,66 @@
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub enum EncryptionType {
     Assymetric,
     Symmetric,
 }
-
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct InitMsg {
     pub pub_key: String,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct InitOkMsg {
     pub sym_key: String,
+    pub orig_pub_key: String,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct KeyPassMsg {
     pub sym_key: String,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct CloseMsg {
     pub data: String,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct ChatMsg {
     pub message: String,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct CloseOkMsg {
     pub data: String,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct PingMsg {}
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct PongMsg {}
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct EncryptedMsg {
     pub data: String,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct DiscoveryMsg {
     pub pub_key: String,
 }
 
+#[derive(Serialize, Deserialize, Clone)]
+pub struct InternalMsg {
+    pub message: String,
+    pub topic: String,
+}
+
 #[repr(u32)]
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub enum SessionErrorCodes {
     Serialization = 1,
     InvalidMessage = 2,
@@ -64,14 +70,14 @@ pub enum SessionErrorCodes {
     Protocol = 6,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct SessionErrorMsg {
     pub code: u32,
     pub message: String,
 }
 
 // Define an enum to encapsulate different message data types
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub enum MessageData {
     Init(InitMsg),
     InitOk(InitOkMsg),
@@ -84,6 +90,7 @@ pub enum MessageData {
     SessionError(SessionErrorMsg),
     KeyPass(KeyPassMsg),
     Discovery(DiscoveryMsg),
+    Internal(InternalMsg),
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -103,7 +110,7 @@ pub enum MessagingError {
     Receiving,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct SessionMessage {
     pub message: MessageData,
     pub session_id: String,
@@ -164,9 +171,19 @@ impl SessionMessage {
         }
     }
 
-    pub fn new_init_ok(sym_key: String) -> Self {
+    pub fn new_init_ok(sym_key: String, orig_pub_key: String) -> Self {
         SessionMessage {
-            message: MessageData::InitOk(InitOkMsg { sym_key }),
+            message: MessageData::InitOk(InitOkMsg {
+                sym_key,
+                orig_pub_key,
+            }),
+            session_id: "".to_string(),
+        }
+    }
+
+    pub fn new_chat(message: String) -> Self {
+        SessionMessage {
+            message: MessageData::Chat(ChatMsg { message: message }),
             session_id: "".to_string(),
         }
     }
@@ -175,6 +192,13 @@ impl SessionMessage {
         SessionMessage {
             message: MessageData::Discovery(DiscoveryMsg { pub_key }),
             session_id: "".to_string(),
+        }
+    }
+
+    pub fn new_internal(session_id: String, message: String, topic: String) -> Self {
+        SessionMessage {
+            message: MessageData::Internal(InternalMsg { message, topic }),
+            session_id,
         }
     }
 

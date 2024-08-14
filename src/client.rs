@@ -181,8 +181,8 @@ async fn main() {
         }
 
         if sub {
-            println!("Serving messages..");
-            session.serve().await;
+            println!("Awaiting for someone to initiailize a session...");
+            session.serve_with_chat().await;
         } else {
             let discover_topic = Topic::Discover.as_str();
             let mut discover_topic_reply = discover_topic.to_string();
@@ -250,65 +250,10 @@ async fn main() {
                 }
             };
 
-            let topic_in = Topic::messaging_topic_in(pub_key_fingerprint.as_ref());
-            let topic_out = Topic::messaging_topic_in(&discovered_pub_key_fingerprint);
-
-            let mut topics: Vec<String> = Vec::new();
-            let mut topic_out_reply = topic_out.clone();
-            topic_out_reply.push_str(Topic::reply_suffix());
-            topics.push(topic_out_reply);
-
-            let (tx, mut rx) = mpsc::channel(100);
-            session.serve_topics(topics, &tx, false).await;
-
-            loop {
-                print!(">> ");
-                io::stdout().flush().unwrap();
-
-                let mut input = String::new();
-                io::stdin()
-                    .read_line(&mut input)
-                    .expect("Failed to read line");
-                let input = input.trim();
-
-                let message = SessionMessage {
-                    message: MessageData::Chat(ChatMsg {
-                        message: input.to_string(),
-                    }),
-                    session_id: "".to_string(),
-                };
-                let msg_enc = session.encrypt_msg(&session_id, &message).await.unwrap();
-                let message = SessionMessage {
-                    message: MessageData::Encrypted(msg_enc),
-                    session_id: session_id.clone(),
-                };
-
-                match handler.send_message(&topic_out, message).await {
-                    Ok(_) => {
-                        println!("Message sent on topic {}", &topic_out)
-                    }
-                    Err(_) => {
-                        println!("Failed to send message");
-                    }
-                };
-                match timeout(Duration::from_secs(5), rx.recv()).await {
-                    Ok(Some(received)) => {
-                        let topic = received.0;
-                        let msg = match SessionMessage::deserialize(&received.1) {
-                            Ok(msg) => {
-                                println!("Got message: {} - {}", topic, msg.to_string());
-                            }
-                            Err(_) => {
-                                println!("Failed to deserialize message");
-                            }
-                        };
-                    }
-                    Ok(None) => {
-                        println!("Reply channel closed");
-                    }
-                    Err(_) => println!("Timed out waiting for a message response.."),
-                };
-            }
+            session
+                .chat(session_id.clone(), &discovered_pub_key_fingerprint, false)
+                .await;
+            session.serve().await;
         }
     }
 }

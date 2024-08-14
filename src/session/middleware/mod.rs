@@ -104,7 +104,6 @@ impl MessagebleTopicAsync for ZenohHandler {
         let subscriber = s.declare_subscriber(topic).res().await.unwrap();
         match subscriber.recv_async().await {
             Ok(incoming) => {
-                println!("incoming!");
                 let incoming = incoming.value.to_string();
                 return match SessionMessage::deserialize(&incoming) {
                     Ok(message) => Ok(message),

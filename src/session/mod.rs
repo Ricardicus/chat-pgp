@@ -5,6 +5,10 @@ use std::thread;
 use std::time::Duration;
 use std::time::SystemTime;
 use tokio::sync::{mpsc, Mutex};
+use tokio::time::timeout;
+
+use std::env;
+use std::io::{self, Write};
 
 pub mod crypto;
 pub mod messages;
@@ -18,13 +22,13 @@ use crypto::{
     PGPEnCryptOwned, PGPEnDeCrypt,
 };
 
-use messages::MessageData::{Chat, Close, Discovery, Encrypted, Init, InitOk, Ping};
+use messages::MessageData::{Chat, Close, Discovery, Encrypted, Init, InitOk, Internal, Ping};
 use messages::MessagingError::*;
 use messages::SessionMessage as Message;
 use messages::{
-    ChatMsg, EncryptedMsg, InitMsg, InitOkMsg, MessageData, MessageListener, Messageble,
-    MessagebleTopicAsync, MessagebleTopicAsyncPublishReads, MessagebleTopicAsyncReadTimeout,
-    MessagingError, SessionErrorCodes, SessionErrorMsg,
+    ChatMsg, EncryptedMsg, InitMsg, InitOkMsg, InternalMsg, MessageData, MessageListener,
+    Messageble, MessagebleTopicAsync, MessagebleTopicAsyncPublishReads,
+    MessagebleTopicAsyncReadTimeout, MessagingError, SessionErrorCodes, SessionErrorMsg,
 };
 use middleware::ZenohHandler;
 
@@ -66,14 +70,19 @@ where
     HostCrypto: CrypticalEncrypt + CrypticalDecrypt,
 {
     pub sessions: Arc<Mutex<HashMap<String, SessionData<SessionCrypto>>>>,
-    pub host_encro: HostCrypto,
+    pub host_encro: Arc<Mutex<HostCrypto>>,
+    pub tx: mpsc::Sender<(String, String)>,
+    pub rx: mpsc::Receiver<(String, String)>,
 }
 
 impl<'a> Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt<'a>> {
     pub fn new(host_encro: PGPEnDeCrypt<'a>) -> Self {
+        let (tx, mut rx) = mpsc::channel(100);
         Session {
             sessions: Arc::new(Mutex::new(HashMap::new())),
-            host_encro,
+            host_encro: Arc::new(Mutex::new(host_encro)),
+            tx,
+            rx,
         }
     }
 
@@ -99,9 +108,6 @@ impl<'a> Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt<'a>> {
                 return Err(SessionNotFound);
             }
         };
-        if session_data.state != SessionState::Active {
-            return Err(InvalidSession);
-        }
         let msg_string = match msg.serialize() {
             Ok(v) => v,
             Err(_) => {
@@ -149,7 +155,7 @@ impl<'a> Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt<'a>> {
         let cert = cert.unwrap();
         let message = Message {
             message: MessageData::Init(InitMsg {
-                pub_key: self.host_encro.get_public_key_as_base64(),
+                pub_key: self.host_encro.lock().await.get_public_key_as_base64(),
             }),
             session_id: "".to_string(),
         };
@@ -175,7 +181,8 @@ impl<'a> Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt<'a>> {
                 match msg.message {
                     InitOk(msg) => {
                         let sym_key_encrypted = msg.sym_key;
-                        let sym_key = match self.host_encro.decrypt(&sym_key_encrypted) {
+                        let sym_key = match self.host_encro.lock().await.decrypt(&sym_key_encrypted)
+                        {
                             Ok(res) => res,
                             Err(_) => {
                                 return Err("Failed to decrypt session key".to_owned());
@@ -210,7 +217,7 @@ impl<'a> Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt<'a>> {
         &mut self,
         client: &T,
     ) -> Result<String, String> {
-        let pub_key = self.host_encro.get_public_key_as_base64();
+        let pub_key = self.host_encro.lock().await.get_public_key_as_base64();
         let message = Message {
             message: MessageData::Init(InitMsg {
                 pub_key: pub_key.clone(),
@@ -228,7 +235,7 @@ impl<'a> Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt<'a>> {
             Ok(message) => match message.message {
                 InitOk(msg) => {
                     let sym_key_encrypted = msg.sym_key;
-                    let sym_key = match self.host_encro.decrypt(&sym_key_encrypted) {
+                    let sym_key = match self.host_encro.lock().await.decrypt(&sym_key_encrypted) {
                         Ok(res) => res,
                         Err(_) => {
                             return Err("Failed to decrypt session key".to_owned());
@@ -266,12 +273,10 @@ impl<'a> Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt<'a>> {
     ) {
         let mut handles = Vec::new();
 
-        println!("Topics to subscribe to {}", topics.len());
         for topic in topics {
             let tx_clone = tx.clone();
             let t = topic.clone();
 
-            println!("Subscribing to topic: {}", &t);
             let h = tokio::spawn(async move {
                 let zenoh_session =
                     Arc::new(Mutex::new(zenoh::open(config::peer()).res().await.unwrap()));
@@ -296,40 +301,39 @@ impl<'a> Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt<'a>> {
     }
 
     pub async fn serve(&mut self) {
-        let pub_key = self.host_encro.get_public_key_fingerprint();
+        let pub_key = self.host_encro.lock().await.get_public_key_fingerprint();
         let mut topics_to_subscribe = Vec::new();
 
         // the initialization topic
         let mut init_topic = Topic::Initialize.as_str().to_owned();
         init_topic.push_str("/");
         init_topic.push_str(&pub_key);
-        // the message topic
-        let mut message_topic = Topic::messaging_topic_in(&pub_key);
 
         topics_to_subscribe.push(init_topic);
-        topics_to_subscribe.push(message_topic);
         topics_to_subscribe.push(Topic::Discover.as_str().to_owned());
 
-        let (tx, mut rx) = mpsc::channel(100);
-        self.serve_topics(topics_to_subscribe, &tx, false).await;
+        let tx_clone = self.tx.clone();
+        self.serve_topics(topics_to_subscribe, &tx_clone, false)
+            .await;
 
         let zenoh_session_responder =
             Arc::new(Mutex::new(zenoh::open(config::peer()).res().await.unwrap()));
         let responder = ZenohHandler::new(zenoh_session_responder);
 
-        while let Some(received) = rx.recv().await {
+        while let Some(received) = self.rx.recv().await {
             let topic = received.0;
             let mut topic_response = topic.clone();
             topic_response.push_str(Topic::reply_suffix());
+
             let msg = match Message::deserialize(&received.1) {
                 Ok(msg) => {
-                    println!("Got message: {}", topic);
                     let session_id = msg.session_id.clone();
-                    match self.handle_message(msg).await {
-                        Ok(response) => {
+                    match self.handle_message(msg, &topic).await {
+                        Ok(res) => {
                             // Do something
-                            responder.send_message(&topic_response, response).await;
-                            println!("(OK) responded on topic {}", topic_response);
+                            let response = res.0;
+                            let topic = res.1;
+                            responder.send_message(&topic, response).await;
                         }
                         Err(errormessage) => {
                             let response = Message {
@@ -347,23 +351,136 @@ impl<'a> Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt<'a>> {
         }
     }
 
-    pub async fn serve_testing(&mut self) {
-        let pub_key = self.host_encro.get_public_key_fingerprint();
+    pub async fn chat(&mut self, session_id: String, other_key_fingerprint: &str, blocking: bool) {
+        let pub_key_fingerprint = self.host_encro.lock().await.get_public_key_fingerprint();
+        let topic_in = Topic::messaging_topic_in(pub_key_fingerprint.as_ref());
+        let topic_out = Topic::messaging_topic_in(&other_key_fingerprint);
+
+        let mut topics: Vec<String> = Vec::new();
+        topics.push(topic_in);
+
+        let tx_clone = self.tx.clone();
+        self.serve_topics(topics, &tx_clone, false).await;
+
+        // Then, if necessary, spawn a new task without capturing self
+        let h = tokio::spawn(async move {
+            loop {
+                print!(">> ");
+                io::stdout().flush().unwrap();
+
+                let mut input = String::new();
+                io::stdin()
+                    .read_line(&mut input)
+                    .expect("Failed to read line");
+                let input = input.trim();
+                let topic = Topic::Internal.as_str();
+                let msg = Message::new_internal(
+                    session_id.to_string(),
+                    input.to_string(),
+                    topic_out.to_string(),
+                );
+                if let Err(e) = tx_clone
+                    .send((topic.to_string(), msg.serialize().unwrap()))
+                    .await
+                {
+                    eprintln!("Failed to send message: {}", e);
+                }
+            }
+        });
+
+        if blocking {
+            h.await.unwrap();
+        }
+    }
+
+    pub async fn serve_with_chat(&mut self) {
+        let pub_key = self.host_encro.lock().await.get_public_key_fingerprint();
         let mut topics_to_subscribe = Vec::new();
 
         // the initialization topic
         let mut init_topic = Topic::Initialize.as_str().to_owned();
         init_topic.push_str("/");
         init_topic.push_str(&pub_key);
-        // the message topic
-        let mut message_topic = Topic::messaging_topic_in(&pub_key);
 
         topics_to_subscribe.push(init_topic);
-        topics_to_subscribe.push(message_topic);
         topics_to_subscribe.push(Topic::Discover.as_str().to_owned());
 
-        let (tx, mut rx) = mpsc::channel(100);
-        self.serve_topics(topics_to_subscribe, &tx, false).await;
+        let tx_clone = self.tx.clone();
+        self.serve_topics(topics_to_subscribe, &tx_clone, false)
+            .await;
+
+        let zenoh_session_responder =
+            Arc::new(Mutex::new(zenoh::open(config::peer()).res().await.unwrap()));
+        let responder = ZenohHandler::new(zenoh_session_responder);
+
+        while let Some(received) = self.rx.recv().await {
+            let topic = received.0;
+            let mut topic_response = topic.clone();
+            topic_response.push_str(Topic::reply_suffix());
+            let msg = match Message::deserialize(&received.1) {
+                Ok(msg) => {
+                    let session_id = msg.session_id.clone();
+                    let msg_clone = msg.clone();
+                    match self.handle_message(msg, &topic).await {
+                        Ok(res) => {
+                            // Do something
+                            let response = res.0;
+                            let topic_response = res.1;
+                            let m = response.clone();
+                            responder
+                                .send_message(&topic_response, response.clone())
+                                .await;
+                            match m.clone().message {
+                                InitOk(m) => {
+                                    let pk = m.orig_pub_key;
+                                    println!("starting chatting {}", &pk);
+                                    // Start chatting
+                                    let pub_key_dec =
+                                        base64::decode(&pk).expect("Failed to decode pub_key");
+                                    let discovered_cert = read_from_vec(&pub_key_dec)
+                                        .expect("Got invalid certificate from discovery");
+                                    let discovered_pub_key_fingerprint =
+                                        discovered_cert.fingerprint().to_string();
+                                    self.chat(
+                                        response.session_id.clone(),
+                                        &discovered_pub_key_fingerprint,
+                                        false,
+                                    )
+                                    .await;
+                                }
+                                _ => {}
+                            }
+                        }
+                        Err(errormessage) => {
+                            let response = Message {
+                                message: MessageData::SessionError(errormessage),
+                                session_id: session_id,
+                            };
+                            let rs = response.to_string();
+                            responder.send_message(&topic_response, response).await;
+                        }
+                    }
+                }
+                Err(_) => {}
+            };
+        }
+    }
+
+    pub async fn serve_testing(&mut self) {
+        let pub_key = self.host_encro.lock().await.get_public_key_fingerprint();
+        let mut topics_to_subscribe = Vec::new();
+
+        // the initialization topic
+        let mut init_topic = Topic::Initialize.as_str().to_owned();
+        init_topic.push_str("/");
+        init_topic.push_str(&pub_key);
+
+        topics_to_subscribe.push(init_topic);
+        topics_to_subscribe.push(Topic::Discover.as_str().to_owned());
+
+        let tx_clone = self.tx.clone();
+        self.serve_topics(topics_to_subscribe, &tx_clone, false)
+            .await;
 
         let zenoh_session_responder =
             Arc::new(Mutex::new(zenoh::open(config::peer()).res().await.unwrap()));
@@ -371,7 +488,7 @@ impl<'a> Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt<'a>> {
 
         let mut msg_count = 0;
 
-        while let Some(received) = rx.recv().await {
+        while let Some(received) = self.rx.recv().await {
             msg_count += 1;
             let topic = received.0;
             let mut topic_response = topic.clone();
@@ -381,11 +498,12 @@ impl<'a> Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt<'a>> {
                 Ok(msg) => {
                     println!("Got message: {}", topic);
                     let session_id = msg.session_id.clone();
-                    match self.handle_message(msg).await {
-                        Ok(response) => {
+                    match self.handle_message(msg, &topic).await {
+                        Ok(res) => {
                             // Do something
+                            let response = res.0;
+                            let topic_response = res.1;
                             responder.send_message(&topic_response, response).await;
-                            println!("(OK) responded on topic {}", topic_response);
                         }
                         Err(errormessage) => {
                             let response = Message {
@@ -414,36 +532,6 @@ impl<'a> Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt<'a>> {
                 } else {
                     println!("-- zero sessions yet.. {}", msg_count);
                 }
-            }
-        }
-    }
-
-    pub async fn serve_old<T: MessageListener + Messageble>(&mut self, server: &T) {
-        loop {
-            match server.listen() {
-                Ok(message) => {
-                    let session_id = message.session_id.clone();
-                    match self.handle_message(message).await {
-                        Ok(response) => {
-                            // Do something
-                            match server.send_message(response) {
-                                Ok(_) => {}
-                                Err(_) => {}
-                            }
-                        }
-                        Err(errormessage) => {
-                            let response = Message {
-                                message: MessageData::SessionError(errormessage),
-                                session_id: session_id,
-                            };
-                            match server.send_message(response) {
-                                Ok(_) => {}
-                                Err(_) => {}
-                            }
-                        }
-                    }
-                }
-                Err(_) => {}
             }
         }
     }
@@ -497,16 +585,48 @@ impl<'a> Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt<'a>> {
     }
 
     #[async_recursion]
-    pub async fn handle_message(&mut self, message: Message) -> Result<Message, SessionErrorMsg> {
-        let mut response = Message::new_init_ok("World".to_string());
+    pub async fn handle_message(
+        &mut self,
+        message: Message,
+        topic: &str,
+    ) -> Result<(Message, String), SessionErrorMsg> {
+        let mut topic_response = topic.to_string();
+        topic_response.push_str(Topic::reply_suffix());
+        let mut response = Message::new_chat("Hello World".to_string());
         response.session_id = message.session_id.clone();
         let msg_raw = message.to_string();
+
         match message.message {
+            Internal(msg) => {
+                if topic == Topic::Internal.as_str() {
+                    let session_id = message.session_id.clone();
+                    let message = Message {
+                        message: MessageData::Chat(ChatMsg {
+                            message: msg.message.to_string(),
+                        }),
+                        session_id: session_id.clone(),
+                    };
+                    let msg_enc = self.encrypt_msg(&session_id, &message).await.unwrap();
+                    let message = Message {
+                        message: MessageData::Encrypted(msg_enc),
+                        session_id: session_id.clone(),
+                    };
+                    topic_response = msg.topic;
+                    // Send this message
+                    return Ok((message, topic_response));
+                } else {
+                    return Err(SessionErrorMsg {
+                        code: SessionErrorCodes::Protocol as u32,
+                        message: "Invalid internal message topic".to_owned(),
+                    });
+                }
+            }
             Discovery(_msg) => {
                 println!("Discovery message received");
-                response = Message::new_discovery(self.host_encro.get_public_key_as_base64());
+                response =
+                    Message::new_discovery(self.host_encro.lock().await.get_public_key_as_base64());
                 response.session_id = message.session_id.clone();
-                Ok(response)
+                Ok((response, topic_response))
             }
             Init(msg) => {
                 println!("Init message received");
@@ -533,7 +653,7 @@ impl<'a> Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt<'a>> {
                             }
                         };
                         let pk_1 = pub_encro.get_public_key_fingerprint();
-                        let pk_2 = self.host_encro.get_public_key_fingerprint();
+                        let pk_2 = self.host_encro.lock().await.get_public_key_fingerprint();
                         let mut s = pk_1 + &pk_2;
                         let key = sha256sum(&s);
                         let session_data = SessionData {
@@ -549,9 +669,10 @@ impl<'a> Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt<'a>> {
                         println!("Session created with id {}", &key);
                         response.message = MessageData::InitOk(InitOkMsg {
                             sym_key: sym_cipher_key_encrypted,
+                            orig_pub_key: pub_encro.get_public_key_as_base64(),
                         });
                         response.session_id = key;
-                        Ok(response)
+                        Ok((response, topic_response))
                     }
                     Err(_) => {
                         println!("Invalid public key");
@@ -564,21 +685,17 @@ impl<'a> Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt<'a>> {
             }
             Close(_msg) => {
                 println!("Close message received");
-                Ok(response)
+                Ok((response, topic_response))
             }
             Ping(_msg) => {
                 println!("Ping message received");
-                Ok(response)
+                Ok((response, topic_response))
             }
             Chat(msg) => {
                 println!("- {}", msg.message);
-                Ok(response)
+                Ok((response, topic_response))
             }
             Encrypted(msg) => {
-                println!(
-                    "Encrypted message received: id {}, raw: {}",
-                    message.session_id, msg_raw
-                );
                 let mut dec_msg = None;
                 {
                     let sm = &self.sessions.lock().await;
@@ -612,7 +729,7 @@ impl<'a> Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt<'a>> {
                 }
                 if dec_msg.is_some() {
                     let dec_msg = dec_msg.unwrap();
-                    self.handle_message(dec_msg).await
+                    self.handle_message(dec_msg, topic).await
                 } else {
                     return Err(SessionErrorMsg {
                         code: SessionErrorCodes::Encryption as u32,
