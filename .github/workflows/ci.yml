@@ -49,4 +49,4 @@ jobs:
       run: |
         ./target/release/client --test-receiver &
         sleep 1
-        ./target/release/client t --test-sender
+        ./target/release/client --test-sender
