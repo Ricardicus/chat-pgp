@@ -1,0 +1,47 @@
+[package]
+name = "pgp-chat"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[[bin]]
+name="server"
+path="./src/server.rs"
+
+[[bin]]
+name="client"
+path="./src/client.rs"
+
+[[bin]]
+name="example_encrypt"
+path="./examples/encrypt.rs"
+
+[[bin]]
+name="example_decrypt"
+path="./examples/decrypt.rs"
+
+#[[bin]]
+#name="example_decrypt2"
+#path="./examples/decrypt2.rs"
+
+[dependencies]
+anyhow = "1.0.79"
+base64 = "0.21.7"
+chrono = "0.4.33"
+clap = { version = "4.4.18", features = ["derive"] }
+ncurses = "5.101.0"
+sequoia-openpgp = "1.17.0"
+serde = { version = "1.0.195", features = ["derive"] }
+zmq = "0.10.0"
+serde_json = "1.0"
+chacha20poly1305 = "0.10.1"
+aead = "0.5.2"
+zenoh = "0.11.0"
+async-std = "1.12.0"
+futures = "0.3.30"
+tokio = "1.38.0"
+lazy_static = "1.5.0"
+async-trait = "0.1.81"
+async-recursion = "1.1.1"
+sha2 = "0.10.8"
