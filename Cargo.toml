@@ -6,24 +6,8 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [[bin]]
-name="server"
-path="./src/server.rs"
-
-[[bin]]
 name="client"
 path="./src/client.rs"
-
-[[bin]]
-name="example_encrypt"
-path="./examples/encrypt.rs"
-
-[[bin]]
-name="example_decrypt"
-path="./examples/decrypt.rs"
-
-#[[bin]]
-#name="example_decrypt2"
-#path="./examples/decrypt2.rs"
 
 [dependencies]
 anyhow = "1.0.79"
