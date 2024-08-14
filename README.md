@@ -21,7 +21,5 @@ This is a work in progress. So far I have this:
 
 Will work on this:
 
-- Web front end
-- Hosting middleware peers that enable communications behind routers
-
+- Web front end + API:ification of the Rust backend.
 
