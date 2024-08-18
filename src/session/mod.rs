@@ -73,6 +73,7 @@ where
     pub host_encro: Arc<Mutex<HostCrypto>>,
     pub tx: mpsc::Sender<(String, String)>,
     pub rx: mpsc::Receiver<(String, String)>,
+    pub rx_local_callbacks: Arc<Mutex<Vec<Box<dyn Fn(&str, &str) + Send>>>>,
 
     pub middleware_config: String,
 }
@@ -85,6 +86,7 @@ impl<'a> Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt<'a>> {
             host_encro: Arc::new(Mutex::new(host_encro)),
             tx,
             rx,
+            rx_local_callbacks: Arc::new(Mutex::new(Vec::new())),
             middleware_config,
         }
     }
@@ -146,6 +148,20 @@ impl<'a> Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt<'a>> {
                 }
             }
             Err(err) => Err(err),
+        }
+    }
+
+    // Register a new callback
+    pub async fn register_rx_local_callback(&self, callback: Box<dyn Fn(&str, &str) + Send>) {
+        let mut callbacks = self.rx_local_callbacks.lock().await;
+        callbacks.push(callback);
+    }
+
+    // Call all registered callbacks
+    async fn call_rx_local_callbacks(&self, arg1: &str, arg2: &str) {
+        let callbacks = self.rx_local_callbacks.lock().await;
+        for callback in callbacks.iter() {
+            callback(arg1, arg2);
         }
     }
 
@@ -702,7 +718,7 @@ impl<'a> Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt<'a>> {
                 Ok((response, topic_response))
             }
             Chat(msg) => {
-                println!("- {}", msg.message);
+                self.call_rx_local_callbacks(&topic, &msg.message).await;
                 Ok((response, topic_response))
             }
             Encrypted(msg) => {

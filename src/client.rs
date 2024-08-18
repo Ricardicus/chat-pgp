@@ -10,6 +10,7 @@ use session::messages::{
 use session::protocol::*;
 use session::Session;
 use std::process::exit;
+use std::thread;
 use zenoh::prelude::r#async::*;
 use zenoh::prelude::*;
 
@@ -60,6 +61,10 @@ struct Cli {
     zenoh_config: String,
 }
 
+fn test_cb(topic: &str, message: &str) {
+    println!("{} - {}", topic, message);
+}
+
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
@@ -107,6 +112,7 @@ async fn main() {
 
         let mut session = Session::new(pgp_handler, zenoh_config.clone());
 
+        session.register_rx_local_callback(Box::new(test_cb)).await;
         let zenoh_config = Config::from_file(zenoh_config).unwrap();
 
         if test_receiver {
@@ -127,8 +133,9 @@ async fn main() {
             let handler = ZenohHandler::new(zenoh_session);
             let mut cont = true;
             let mut attempts = 0;
+            let maxattempts = 10;
             let mut pub_key = None;
-            while attempts < 10 && cont {
+            while attempts < maxattempts && cont {
                 let msg = SessionMessage::new_discovery(pub_key_fingerprint.clone());
                 match session
                     .send_and_multi_receive_topic(
@@ -161,8 +168,13 @@ async fn main() {
                         }
                     }
                     Err(_) => {
-                        println!("Failed to discover any nodes out there.. exiting.");
-                        exit(1);
+                        if attempts >= maxattempts {
+                            println!("Failed to discover any nodes out there.. exiting.");
+                            exit(1);
+                        } else {
+                            attempts += 1;
+                            thread::sleep(Duration::from_secs(3));
+                        }
                     }
                 };
             }
