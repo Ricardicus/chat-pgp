@@ -2117,6 +2117,7 @@ dependencies = [
  "futures",
  "lazy_static",
  "ncurses",
+ "once_cell",
  "sequoia-openpgp",
  "serde",
  "serde_json",

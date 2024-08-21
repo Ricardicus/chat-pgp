@@ -1,7 +1,9 @@
 #![allow(dead_code)]
 mod session;
 
-use session::crypto::{ChaCha20Poly1305EnDeCrypt, Cryptical, PGPEnDeCrypt};
+use session::crypto::{
+    ChaCha20Poly1305EnDeCrypt, Cryptical, CrypticalID, PGPEnCryptOwned, PGPEnDeCrypt,
+};
 use session::messages::MessageData::Discovery;
 use session::messages::{
     ChatMsg, DiscoveryMsg, EncryptedMsg, InitMsg, MessageData, MessageListener, Messageble,
@@ -22,6 +24,8 @@ use tokio::time::timeout;
 use std::env;
 use std::io::{self, Write};
 
+use once_cell::sync::Lazy;
+
 mod util;
 
 mod pgp;
@@ -29,6 +33,9 @@ use pgp::pgp::{generate_new_key, get_public_key_as_base64, read_from_gpg, read_f
 
 use clap::Parser;
 use ncurses::*;
+
+mod terminal;
+use terminal::WindowManager;
 
 use session::middleware::{ZMQHandler, ZenohHandler};
 
@@ -61,8 +68,63 @@ struct Cli {
     zenoh_config: String,
 }
 
-fn test_cb(topic: &str, message: &str) {
-    println!("{} - {}", topic, message);
+// Create a global instance of WindowManager
+static WINDOW_MANAGER: Lazy<WindowManager> = Lazy::new(|| {
+    let manager = WindowManager::init(2);
+    manager
+});
+
+fn test_cb_chat(public_key: &str, message: &str) {
+    let pub_key_decoded = match base64::decode(public_key) {
+        Err(_) => {
+            return;
+        }
+        Ok(pub_key) => pub_key,
+    };
+    match PGPEnCryptOwned::new_from_vec(&pub_key_decoded) {
+        Ok(pub_encro) => {
+            WINDOW_MANAGER.printw(0, &format!("{}: {}", pub_encro.get_userid(), message));
+        }
+        _ => {}
+    }
+}
+fn test_cb_discovered(public_key: &str) {
+    let pub_key_decoded = match base64::decode(public_key) {
+        Err(_) => {
+            return;
+        }
+        Ok(pub_key) => pub_key,
+    };
+    match PGPEnCryptOwned::new_from_vec(&pub_key_decoded) {
+        Ok(pub_encro) => {
+            WINDOW_MANAGER.printw(
+                1,
+                &format!(
+                    "-- Discovered public key: {}",
+                    pub_encro.get_public_key_fingerprint()
+                ),
+            );
+        }
+        _ => {}
+    }
+}
+
+fn test_cb_initialized(public_key: &str) {
+    let pub_key_decoded = match base64::decode(public_key) {
+        Err(_) => {
+            return;
+        }
+        Ok(pub_key) => pub_key,
+    };
+    match PGPEnCryptOwned::new_from_vec(&pub_key_decoded) {
+        Ok(pub_encro) => {
+            WINDOW_MANAGER.printw(
+                0,
+                &format!("-- Initializing chat with {}", pub_encro.get_userid()),
+            );
+        }
+        _ => {}
+    }
 }
 
 #[tokio::main]
@@ -109,10 +171,18 @@ async fn main() {
 
         let pgp_handler = PGPEnDeCrypt::new(&cert, &passphrase);
         let pub_key_fingerprint = pgp_handler.get_public_key_fingerprint();
+        let pub_key_full = pgp_handler.get_public_key_as_base64();
 
         let mut session = Session::new(pgp_handler, zenoh_config.clone());
 
-        session.register_rx_local_callback(Box::new(test_cb)).await;
+        session.register_callback_chat(Box::new(test_cb_chat)).await;
+        session
+            .register_callback_initialized(Box::new(test_cb_initialized))
+            .await;
+        session
+            .register_callback_discovered(Box::new(test_cb_discovered))
+            .await;
+
         let zenoh_config = Config::from_file(zenoh_config).unwrap();
 
         if test_receiver {
@@ -136,7 +206,7 @@ async fn main() {
             let maxattempts = 10;
             let mut pub_key = None;
             while attempts < maxattempts && cont {
-                let msg = SessionMessage::new_discovery(pub_key_fingerprint.clone());
+                let msg = SessionMessage::new_discovery(pub_key_full.clone());
                 match session
                     .send_and_multi_receive_topic(
                         msg,
@@ -200,7 +270,8 @@ async fn main() {
         }
 
         if sub {
-            println!("Awaiting for someone to initiailize a session...");
+            let mut i = 0;
+            WINDOW_MANAGER.printw(1, &format!("-- Awaiting peer to connect..."));
             session.serve_with_chat().await;
         } else {
             let discover_topic = Topic::Discover.as_str();
@@ -215,7 +286,7 @@ async fn main() {
             let mut attempts = 0;
             let mut pub_key = None;
             while attempts < 10 && cont {
-                let msg = SessionMessage::new_discovery(pub_key_fingerprint.clone());
+                let msg = SessionMessage::new_discovery(pub_key_full.clone());
                 match session
                     .send_and_multi_receive_topic(
                         msg,
