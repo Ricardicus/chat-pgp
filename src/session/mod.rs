@@ -76,6 +76,8 @@ where
     pub callbacks_chat: Arc<Mutex<Vec<Box<dyn Fn(&str, &str) + Send>>>>,
     pub callbacks_discovered: Arc<Mutex<Vec<Box<dyn Fn(&str) + Send>>>>,
     pub callbacks_initialized: Arc<Mutex<Vec<Box<dyn Fn(&str) + Send>>>>,
+    pub callbacks_chat_input:
+        Arc<Mutex<Vec<Box<dyn Fn(&str, &str, &str) -> (String, String) + Send + Sync>>>>,
 
     pub middleware_config: String,
 }
@@ -91,6 +93,7 @@ impl<'a> Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt<'a>> {
             callbacks_chat: Arc::new(Mutex::new(Vec::new())),
             callbacks_discovered: Arc::new(Mutex::new(Vec::new())),
             callbacks_initialized: Arc::new(Mutex::new(Vec::new())),
+            callbacks_chat_input: Arc::new(Mutex::new(Vec::new())),
             middleware_config,
         }
     }
@@ -167,6 +170,13 @@ impl<'a> Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt<'a>> {
     pub async fn register_callback_initialized(&self, callback: Box<dyn Fn(&str) + Send>) {
         let mut callbacks = self.callbacks_initialized.lock().await;
         callbacks.push(callback);
+    }
+    pub async fn register_callback_chat_input(
+        &self,
+        callback: Box<dyn Fn(&str, &str, &str) + Send + Sync>,
+    ) {
+        let mut callbacks = self.callbacks_chat_input.lock().await;
+        //callbacks.push(callback);
     }
 
     async fn call_callbacks_chat(&self, arg1: &str, arg2: &str) {
@@ -407,9 +417,19 @@ impl<'a> Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt<'a>> {
         let tx_clone = self.tx.clone();
         self.serve_topics(topics, &tx_clone, false).await;
 
+        let other_key_fingerprint: String = other_key_fingerprint.to_string();
+
+        let callbacks = self.callbacks_chat_input.clone();
         // Then, if necessary, spawn a new task without capturing self
         let h = tokio::spawn(async move {
             loop {
+                let callbacks = callbacks.lock().await;
+                for callback in callbacks.iter() {
+                    let (topic, msg) = callback(&other_key_fingerprint, &session_id, &topic_out);
+                    if let Err(e) = tx_clone.send((topic, msg)).await {}
+                }
+            }
+            /*loop {
                 print!(">> ");
                 io::stdout().flush().unwrap();
 
@@ -428,7 +448,7 @@ impl<'a> Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt<'a>> {
                     .send((topic.to_string(), msg.serialize().unwrap()))
                     .await
                 {}
-            }
+            }*/
         });
 
         if blocking {

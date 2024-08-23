@@ -88,6 +88,32 @@ fn test_cb_chat(public_key: &str, message: &str) {
         _ => {}
     }
 }
+
+fn test_cb_chat_input(
+    pub_key_fingerprint: &str,
+    session_id: &str,
+    topic_out: &str,
+) -> (String, String) {
+    WINDOW_MANAGER.printw(1, ":) >>");
+    WINDOW_MANAGER.getch(1);
+
+    let mut input = String::new();
+    io::stdin()
+        .read_line(&mut input)
+        .expect("Failed to read line");
+    let input = input.trim();
+    let topic = Topic::Internal.as_str();
+    let msg = SessionMessage::new_internal(
+        session_id.to_string(),
+        input.to_string(),
+        topic_out.to_string(),
+    );
+    (topic.to_string(), msg.serialize().unwrap())
+    /*if let Err(e) = tx
+    .send((topic.to_string(), msg.serialize().unwrap()))
+    .await*/
+}
+
 fn test_cb_discovered(public_key: &str) {
     let pub_key_decoded = match base64::decode(public_key) {
         Err(_) => {

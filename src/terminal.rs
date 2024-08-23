@@ -58,6 +58,21 @@ impl WindowManager {
         }
     }
 
+    pub fn getch(&self, window: usize) -> String {
+        let mut input = String::new();
+
+        if let Some(window) = self.windows.get(&window) {
+            // Print the message in the window
+            mvwgetstr(*window, 3, 1, &mut input);
+            mvwprintw(*window, 4, 1, &format!("You typed: {}", input));
+            wrefresh(*window);
+        } else {
+            println!("Window number {} does not exist.", window);
+        }
+
+        input
+    }
+
     // Make window interactive
     pub fn interactive_input(&self, window_number: usize) {
         if let Some(win) = self.windows.get(&window_number) {
