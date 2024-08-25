@@ -6,7 +6,7 @@ Welcome to PGP chat. This in a encrypted chat platform based on [PGP](https://en
 
 Each chat session is encrypted using a symmectrical ChaCha20Poly1305 algorithm
 with a shared secret that is protected with PGP assymetrical
-encryption. If you are unfamiliar with OpenPGP and using GnuPG then see [This GPG guide](https://www.gnupg.org/gph/en/manual/c14.html). 
+encryption. If you are unfamiliar with OpenPGP and using GnuPG then see this [GPG guide](https://www.gnupg.org/gph/en/manual/c14.html). 
 
 ## Communication
 
