@@ -22,6 +22,9 @@ pub trait CrypticalEncrypt {
 pub trait CrypticalDecrypt {
     fn decrypt(&self, input: &str) -> Result<String, String>;
 }
+pub trait CrypticalID {
+    fn get_userid(&self) -> String;
+}
 
 #[derive(Clone)]
 pub struct ChaCha20Poly1305EnDeCrypt {
@@ -138,6 +141,16 @@ impl<'a> Cryptical for PGPEnDeCrypt<'a> {
         self.cert.fingerprint().to_string()
     }
 }
+impl<'a> CrypticalID for PGPEnDeCrypt<'a> {
+    fn get_userid(&self) -> String {
+        let mut userid = "".to_string();
+        for uid in self.cert.userids() {
+            userid.push_str(&uid.userid().to_string());
+        }
+        return userid;
+    }
+}
+
 impl<'a> CrypticalEncrypt for PGPEnDeCrypt<'a> {
     fn encrypt(&self, input: &str) -> Result<String, String> {
         // Implement your encryption logic here
@@ -190,6 +203,16 @@ impl PGPEnCryptOwned {
             Ok(cert) => Ok(PGPEnCryptOwned { cert }),
             Err(msg) => Err(msg),
         }
+    }
+}
+
+impl CrypticalID for PGPEnCryptOwned {
+    fn get_userid(&self) -> String {
+        let mut userid = "".to_string();
+        for uid in self.cert.userids() {
+            userid.push_str(&uid.userid().to_string());
+        }
+        return userid;
     }
 }
 

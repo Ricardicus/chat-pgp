@@ -36,7 +36,7 @@ pub mod pgp {
     }
 
     pub fn generate_new_key() -> Result<openpgp::Cert, String> {
-        let res = CertBuilder::general_purpose(None, Some("alice@example.org"))
+        let res = CertBuilder::general_purpose(None, Some("the@example.org"))
             .set_cipher_suite(CipherSuite::RSA2k)
             .generate();
         if res.is_err() {
