@@ -65,7 +65,7 @@ impl WindowManager {
                 // Move the cursor to just inside the box, 1 line down, 1 column in
                 wmove(*win, getcury(*win), 1);
                 self.printw(window_number, prompt);
-                wmove(*win, getcury(*win), prompt.len().try_into().unwrap());
+                wmove(*win, getcury(*win), (prompt.len() + 1) as i32);
                 wrefresh(*win);
 
                 let mut input = String::new();
@@ -83,16 +83,10 @@ impl WindowManager {
                         }
                     } else {
                         input.push(char::from_u32(ch as u32).unwrap());
-                        waddch(*win, ch as u32);
                     }
                     wrefresh(*win);
                     ch = wgetch(*win);
                 }
-
-                // Add the input to the window and scroll if necessary
-                wmove(*win, getcury(*win), 1);
-                waddch(*win, '\n' as u32);
-                wrefresh(*win);
 
                 // Redraw the box after every input to maintain the boundaries
                 box_(*win, 0, 0);

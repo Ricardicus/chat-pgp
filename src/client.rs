@@ -83,14 +83,22 @@ fn test_cb_chat(public_key: &str, message: &str) {
     };
     match PGPEnCryptOwned::new_from_vec(&pub_key_decoded) {
         Ok(pub_encro) => {
-            WINDOW_MANAGER.printw(0, &format!("{}: {}", pub_encro.get_userid(), message));
+            WINDOW_MANAGER.printw(
+                0,
+                &format!(
+                    "{} ({}): {}",
+                    pub_encro.get_public_key_fingerprint(),
+                    pub_encro.get_userid(),
+                    message
+                ),
+            );
         }
         _ => {}
     }
 }
 
 fn test_cb_chat_input(
-    pub_key_fingerprint: &str,
+    _pub_key_fingerprint: &str,
     session_id: &str,
     topic_out: &str,
 ) -> (String, String) {
@@ -104,9 +112,6 @@ fn test_cb_chat_input(
         topic_out.to_string(),
     );
     (topic.to_string(), msg.serialize().unwrap())
-    /*if let Err(e) = tx
-    .send((topic.to_string(), msg.serialize().unwrap()))
-    .await*/
 }
 
 fn test_cb_discovered(public_key: &str) {

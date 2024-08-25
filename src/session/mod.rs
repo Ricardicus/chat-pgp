@@ -684,9 +684,8 @@ impl<'a> Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt<'a>> {
                     };
                     topic_response = msg.topic;
 
-                    if let Ok(pub_key) = self.get_pub_key_from_session_id(&session_id).await {
-                        self.call_callbacks_chat(&pub_key, &msg.message).await;
-                    }
+                    let pk = self.host_encro.lock().await.get_public_key_as_base64();
+                    self.call_callbacks_chat(&pk, &msg.message).await;
 
                     // Send this message
                     return Ok((message, topic_response));
