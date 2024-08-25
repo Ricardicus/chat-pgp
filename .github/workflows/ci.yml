@@ -46,6 +46,8 @@ jobs:
       run: cargo build --release
 
     - name: Run tests with xvfb-run
+      env:
+        TERM: xterm-256color
       run: |
         xvfb-run -a ./target/release/client --test-receiver &
         sleep 1
