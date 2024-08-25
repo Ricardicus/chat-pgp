@@ -58,27 +58,14 @@ impl WindowManager {
         }
     }
 
-    pub fn getch(&self, window: usize) -> String {
-        let mut input = String::new();
-
-        if let Some(window) = self.windows.get(&window) {
-            // Print the message in the window
-            mvwgetstr(*window, 3, 1, &mut input);
-            mvwprintw(*window, 4, 1, &format!("You typed: {}", input));
-            wrefresh(*window);
-        } else {
-            println!("Window number {} does not exist.", window);
-        }
-
-        input
-    }
-
     // Make window interactive
-    pub fn interactive_input(&self, window_number: usize) {
+    pub fn getch(&self, window_number: usize, prompt: &str) -> String {
         if let Some(win) = self.windows.get(&window_number) {
             loop {
                 // Move the cursor to just inside the box, 1 line down, 1 column in
-                wmove(*win, getcury(*win) + 1, 1);
+                wmove(*win, getcury(*win), 1);
+                self.printw(window_number, prompt);
+                wmove(*win, getcury(*win), prompt.len().try_into().unwrap());
                 wrefresh(*win);
 
                 let mut input = String::new();
@@ -87,7 +74,7 @@ impl WindowManager {
                 curs_set(CURSOR_VISIBILITY::CURSOR_VISIBLE);
 
                 // Handle user input
-                let ch = wgetch(*win);
+                let mut ch = wgetch(*win);
                 while ch != '\n' as i32 {
                     if ch == KEY_BACKSPACE || ch == 127 {
                         if !input.is_empty() {
@@ -95,11 +82,11 @@ impl WindowManager {
                             wdelch(*win);
                         }
                     } else {
-                        input.push(ch as u8 as char);
+                        input.push(char::from_u32(ch as u32).unwrap());
                         waddch(*win, ch as u32);
                     }
                     wrefresh(*win);
-                    let ch = wgetch(*win);
+                    ch = wgetch(*win);
                 }
 
                 // Add the input to the window and scroll if necessary
@@ -112,16 +99,11 @@ impl WindowManager {
                 wrefresh(*win);
 
                 // Exit condition (optional)
-                if input.trim() == "exit" {
-                    break;
-                }
+                return input;
             }
-
-            nocbreak();
-            noecho();
-            curs_set(CURSOR_VISIBILITY::CURSOR_INVISIBLE);
         } else {
             println!("Window number {} does not exist.", window_number);
+            "".to_string()
         }
     }
 
@@ -140,7 +122,8 @@ fn main() {
     manager.printw(0, "Window 1:");
     manager.printw(1, "Window 2: Interactive");
 
-    manager.interactive_input(1);
+    let p = ">> ";
+    manager.getch(1, &p);
 
     manager.cleanup(); // Clean up ncurses
 }

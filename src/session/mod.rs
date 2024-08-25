@@ -173,10 +173,10 @@ impl<'a> Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt<'a>> {
     }
     pub async fn register_callback_chat_input(
         &self,
-        callback: Box<dyn Fn(&str, &str, &str) + Send + Sync>,
+        callback: Box<dyn Fn(&str, &str, &str) -> (String, String) + Send + Sync>,
     ) {
         let mut callbacks = self.callbacks_chat_input.lock().await;
-        //callbacks.push(callback);
+        callbacks.push(callback);
     }
 
     async fn call_callbacks_chat(&self, arg1: &str, arg2: &str) {
@@ -253,6 +253,7 @@ impl<'a> Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt<'a>> {
                         };
                         let mut hm = self.sessions.lock().await;
                         hm.insert(key.clone(), session_data);
+                        self.call_callbacks_initialized(&pub_key).await;
                         return Ok(key);
                     }
                     _ => {
@@ -644,6 +645,15 @@ impl<'a> Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt<'a>> {
         Ok(session_message)
     }
 
+    pub async fn get_pub_key_from_session_id(&self, session_id: &str) -> Result<String, String> {
+        if let Some(session_data) = self.sessions.lock().await.get(session_id) {
+            let pub_key = session_data.pub_key.clone();
+            Ok(pub_key)
+        } else {
+            Err("Nope".to_string())
+        }
+    }
+
     #[async_recursion]
     pub async fn handle_message(
         &mut self,
@@ -673,6 +683,11 @@ impl<'a> Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt<'a>> {
                         session_id: session_id.clone(),
                     };
                     topic_response = msg.topic;
+
+                    if let Ok(pub_key) = self.get_pub_key_from_session_id(&session_id).await {
+                        self.call_callbacks_chat(&pub_key, &msg.message).await;
+                    }
+
                     // Send this message
                     return Ok((message, topic_response));
                 } else {
