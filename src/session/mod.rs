@@ -74,7 +74,7 @@ where
     pub tx: mpsc::Sender<(String, String)>,
     pub rx: mpsc::Receiver<(String, String)>,
     pub callbacks_chat: Arc<Mutex<Vec<Box<dyn Fn(&str, &str) + Send>>>>,
-    pub callbacks_discovered: Arc<Mutex<Vec<Box<dyn Fn(&str) + Send>>>>,
+    pub callbacks_discovered: Arc<Mutex<Vec<Box<dyn Fn(&str) -> bool + Send>>>>,
     pub callbacks_initialized: Arc<Mutex<Vec<Box<dyn Fn(&str) + Send>>>>,
     pub callbacks_chat_input:
         Arc<Mutex<Vec<Box<dyn Fn(&str, &str, &str) -> (String, String) + Send + Sync>>>>,
@@ -163,7 +163,7 @@ impl<'a> Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt<'a>> {
         let mut callbacks = self.callbacks_chat.lock().await;
         callbacks.push(callback);
     }
-    pub async fn register_callback_discovered(&self, callback: Box<dyn Fn(&str) + Send>) {
+    pub async fn register_callback_discovered(&self, callback: Box<dyn Fn(&str) -> bool + Send>) {
         let mut callbacks = self.callbacks_discovered.lock().await;
         callbacks.push(callback);
     }
@@ -191,11 +191,15 @@ impl<'a> Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt<'a>> {
             callback(arg1);
         }
     }
-    async fn call_callbacks_discovered(&self, arg1: &str) {
+    async fn call_callbacks_discovered(&self, arg1: &str) -> bool {
         let callbacks = self.callbacks_discovered.lock().await;
         for callback in callbacks.iter() {
-            callback(arg1);
+            let shall_initialize = callback(arg1);
+            if shall_initialize {
+                return true;
+            }
         }
+        false
     }
 
     pub async fn initialize_session_zenoh(&self, pub_key: String) -> Result<String, String> {
@@ -355,58 +359,6 @@ impl<'a> Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt<'a>> {
         }
     }
 
-    pub async fn serve(&mut self) {
-        let pub_key = self.host_encro.lock().await.get_public_key_fingerprint();
-        let mut topics_to_subscribe = Vec::new();
-
-        // the initialization topic
-        let mut init_topic = Topic::Initialize.as_str().to_owned();
-        init_topic.push_str("/");
-        init_topic.push_str(&pub_key);
-
-        topics_to_subscribe.push(init_topic);
-        topics_to_subscribe.push(Topic::Discover.as_str().to_owned());
-
-        let tx_clone = self.tx.clone();
-        self.serve_topics(topics_to_subscribe, &tx_clone, false)
-            .await;
-
-        let zc = self.middleware_config.clone();
-        let zenoh_config = Config::from_file(zc).unwrap();
-        let zenoh_session_responder =
-            Arc::new(Mutex::new(zenoh::open(zenoh_config).res().await.unwrap()));
-        let responder = ZenohHandler::new(zenoh_session_responder);
-
-        while let Some(received) = self.rx.recv().await {
-            let topic = received.0;
-            let mut topic_response = topic.clone();
-            topic_response.push_str(Topic::reply_suffix());
-
-            let msg = match Message::deserialize(&received.1) {
-                Ok(msg) => {
-                    let session_id = msg.session_id.clone();
-                    match self.handle_message(msg, &topic).await {
-                        Ok(res) => {
-                            // Do something
-                            let response = res.0;
-                            let topic = res.1;
-                            responder.send_message(&topic, response).await;
-                        }
-                        Err(errormessage) => {
-                            let response = Message {
-                                message: MessageData::SessionError(errormessage),
-                                session_id: session_id,
-                            };
-                            let rs = response.to_string();
-                            responder.send_message(&topic_response, response).await;
-                        }
-                    }
-                }
-                Err(_) => {}
-            };
-        }
-    }
-
     pub async fn chat(&mut self, session_id: String, other_key_fingerprint: &str, blocking: bool) {
         let pub_key_fingerprint = self.host_encro.lock().await.get_public_key_fingerprint();
         let topic_in = Topic::messaging_topic_in(pub_key_fingerprint.as_ref());
@@ -421,7 +373,6 @@ impl<'a> Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt<'a>> {
         let other_key_fingerprint: String = other_key_fingerprint.to_string();
 
         let callbacks = self.callbacks_chat_input.clone();
-        // Then, if necessary, spawn a new task without capturing self
         let h = tokio::spawn(async move {
             loop {
                 let callbacks = callbacks.lock().await;
@@ -430,26 +381,6 @@ impl<'a> Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt<'a>> {
                     if let Err(e) = tx_clone.send((topic, msg)).await {}
                 }
             }
-            /*loop {
-                print!(">> ");
-                io::stdout().flush().unwrap();
-
-                let mut input = String::new();
-                io::stdin()
-                    .read_line(&mut input)
-                    .expect("Failed to read line");
-                let input = input.trim();
-                let topic = Topic::Internal.as_str();
-                let msg = Message::new_internal(
-                    session_id.to_string(),
-                    input.to_string(),
-                    topic_out.to_string(),
-                );
-                if let Err(e) = tx_clone
-                    .send((topic.to_string(), msg.serialize().unwrap()))
-                    .await
-                {}
-            }*/
         });
 
         if blocking {
@@ -457,7 +388,7 @@ impl<'a> Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt<'a>> {
         }
     }
 
-    pub async fn serve_with_chat(&mut self) {
+    pub async fn serve(&mut self) {
         let pub_key = self.host_encro.lock().await.get_public_key_fingerprint();
         let mut topics_to_subscribe = Vec::new();
 
@@ -495,25 +426,6 @@ impl<'a> Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt<'a>> {
                             responder
                                 .send_message(&topic_response, response.clone())
                                 .await;
-                            match m.clone().message {
-                                InitOk(m) => {
-                                    let pk = m.orig_pub_key;
-                                    // Start chatting
-                                    let pub_key_dec =
-                                        base64::decode(&pk).expect("Failed to decode pub_key");
-                                    let discovered_cert = read_from_vec(&pub_key_dec)
-                                        .expect("Got invalid certificate from discovery");
-                                    let discovered_pub_key_fingerprint =
-                                        discovered_cert.fingerprint().to_string();
-                                    self.chat(
-                                        response.session_id.clone(),
-                                        &discovered_pub_key_fingerprint,
-                                        false,
-                                    )
-                                    .await;
-                                }
-                                _ => {}
-                            }
                         }
                         Err(errormessage) => {
                             let response = Message {
@@ -595,6 +507,89 @@ impl<'a> Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt<'a>> {
                 }
             }
         }
+    }
+
+    pub async fn discover(&mut self) -> Vec<String> {
+        let discover_topic = Topic::Discover.as_str();
+        let mut discover_topic_reply = discover_topic.to_string();
+        discover_topic_reply.push_str(Topic::reply_suffix());
+        let timeout_discovery = Duration::from_secs(5);
+        let mut cont = true;
+        let mut attempts = 0;
+        let maxattempts = 10;
+        let mut pub_keys = Vec::new();
+
+        let zc = self.middleware_config.clone();
+        let zenoh_config = Config::from_file(zc).unwrap();
+        let zenoh_session = Arc::new(Mutex::new(zenoh::open(zenoh_config).res().await.unwrap()));
+        let handler = ZenohHandler::new(zenoh_session);
+
+        let mut this_pub_key = None;
+        {
+            this_pub_key = Some(self.host_encro.lock().await.get_public_key_as_base64());
+        }
+        while attempts < maxattempts && cont {
+            let msg = Message::new_discovery(this_pub_key.clone().unwrap());
+            match self
+                .send_and_multi_receive_topic(
+                    msg,
+                    discover_topic,
+                    &discover_topic_reply,
+                    timeout_discovery,
+                    &handler,
+                )
+                .await
+            {
+                Ok(msgs) => {
+                    if msgs.len() == 0 {
+                        attempts += 1;
+                    } else {
+                        cont = false;
+                    }
+                    for msg in msgs {
+                        match msg.message {
+                            Discovery(disc_msg) => {
+                                let pub_key = disc_msg.pub_key.clone();
+                                if !pub_keys.contains(&pub_key) {
+                                    let pub_key_dec =
+                                        base64::decode(&pub_key).expect("Failed to decode pub_key");
+                                    let discovered_cert = read_from_vec(&pub_key_dec)
+                                        .expect("Got invalid certificate from discovery");
+                                    let discovered_pub_key_fingerprint =
+                                        discovered_cert.fingerprint().to_string();
+                                    pub_keys.push(disc_msg.pub_key);
+                                    let shall_initialize =
+                                        self.call_callbacks_discovered(&pub_key).await;
+                                    if shall_initialize {
+                                        if let Ok(session_id) =
+                                            self.initialize_session_zenoh(pub_key.clone()).await
+                                        {
+                                            self.chat(
+                                                session_id.clone(),
+                                                &discovered_pub_key_fingerprint,
+                                                false,
+                                            )
+                                            .await;
+                                        }
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Err(_) => {
+                    if attempts >= maxattempts {
+                        println!("Failed to discover any nodes out there.. exiting.");
+                        exit(1);
+                    } else {
+                        attempts += 1;
+                        thread::sleep(Duration::from_secs(3));
+                    }
+                }
+            };
+        }
+        pub_keys
     }
 
     pub async fn send_and_receive_topic<
@@ -698,7 +693,6 @@ impl<'a> Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt<'a>> {
             }
             Discovery(_msg) => {
                 let pk = _msg.pub_key.clone();
-                self.call_callbacks_discovered(&pk).await;
                 response =
                     Message::new_discovery(self.host_encro.lock().await.get_public_key_as_base64());
                 response.session_id = message.session_id.clone();
@@ -729,7 +723,7 @@ impl<'a> Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt<'a>> {
                         };
                         let pk_1 = pub_encro.get_public_key_fingerprint();
                         let pk_2 = self.host_encro.lock().await.get_public_key_fingerprint();
-                        let mut s = pk_1 + &pk_2;
+                        let s = pk_1.clone() + &pk_2;
                         let key = sha256sum(&s);
                         let pub_key = pub_encro.get_public_key_as_base64();
                         let session_data = SessionData {
@@ -740,14 +734,17 @@ impl<'a> Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt<'a>> {
                             messages: Vec::new(),
                             sym_encro: sym_cipher,
                         };
-                        let mut hm = self.sessions.lock().await;
-                        hm.insert(key.clone(), session_data);
-                        self.call_callbacks_initialized(&pub_key).await;
+                        {
+                            let mut hm = self.sessions.lock().await;
+                            hm.insert(key.clone(), session_data);
+                            self.call_callbacks_initialized(&pub_key).await;
+                        }
                         response.message = MessageData::InitOk(InitOkMsg {
                             sym_key: sym_cipher_key_encrypted,
                             orig_pub_key: pub_encro.get_public_key_as_base64(),
                         });
-                        response.session_id = key;
+                        response.session_id = key.clone();
+                        self.chat(key.clone(), &pk_1, false).await;
                         Ok((response, topic_response))
                     }
                     Err(_) => Err(SessionErrorMsg {

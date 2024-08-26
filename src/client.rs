@@ -114,10 +114,11 @@ fn test_cb_chat_input(
     (topic.to_string(), msg.serialize().unwrap())
 }
 
-fn test_cb_discovered(public_key: &str) {
+fn test_cb_discovered(public_key: &str) -> bool {
+    let mut shall_initialize = false;
     let pub_key_decoded = match base64::decode(public_key) {
         Err(_) => {
-            return;
+            return false;
         }
         Ok(pub_key) => pub_key,
     };
@@ -126,13 +127,20 @@ fn test_cb_discovered(public_key: &str) {
             WINDOW_MANAGER.printw(
                 1,
                 &format!(
-                    "-- Discovered public key: {}",
-                    pub_encro.get_public_key_fingerprint()
+                    "-- Discovered public key {} from {}",
+                    pub_encro.get_public_key_fingerprint(),
+                    pub_encro.get_userid()
                 ),
             );
+            WINDOW_MANAGER.printw(1, "Do you want to chat with this peer? [y/n]");
+            let input = WINDOW_MANAGER.getch(1, ">> ");
+            if input.to_lowercase().starts_with('y') {
+                shall_initialize = true;
+            }
         }
         _ => {}
     }
+    shall_initialize
 }
 
 fn test_cb_initialized(public_key: &str) {
@@ -146,7 +154,11 @@ fn test_cb_initialized(public_key: &str) {
         Ok(pub_encro) => {
             WINDOW_MANAGER.printw(
                 0,
-                &format!("-- Initializing chat with {}", pub_encro.get_userid()),
+                &format!("-- Initialized chat with {}", pub_encro.get_userid()),
+            );
+            WINDOW_MANAGER.printw(
+                1,
+                &format!("-- Initialized chat with {}", pub_encro.get_userid()),
             );
         }
         _ => {}
@@ -220,56 +232,11 @@ async fn main() {
 
     if test_sender {
         println!("-- Testing initiailize session [sender]");
-        let discover_topic = Topic::Discover.as_str();
-        let mut discover_topic_reply = discover_topic.to_string();
-        discover_topic_reply.push_str(Topic::reply_suffix());
-        let timeout_discovery = Duration::from_secs(5);
-
-        let zenoh_session = Arc::new(Mutex::new(zenoh::open(zenoh_config).res().await.unwrap()));
-        let handler = ZenohHandler::new(zenoh_session);
-        let mut cont = true;
-        let mut attempts = 0;
-        let maxattempts = 10;
         let mut pub_key = None;
-        while attempts < maxattempts && cont {
-            let msg = SessionMessage::new_discovery(pub_key_full.clone());
-            match session
-                .send_and_multi_receive_topic(
-                    msg,
-                    discover_topic,
-                    &discover_topic_reply,
-                    timeout_discovery,
-                    &handler,
-                )
-                .await
-            {
-                Ok(msgs) => {
-                    if msgs.len() == 0 {
-                        attempts += 1;
-                    }
-                    for msg in msgs {
-                        match msg.message {
-                            Discovery(disc_msg) => {
-                                println!("Discovered a node with pub_key: {}", &disc_msg.pub_key);
-                                cont = false;
-                                if pub_key.is_none() {
-                                    pub_key = Some(disc_msg.pub_key);
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                Err(_) => {
-                    if attempts >= maxattempts {
-                        println!("Failed to discover any nodes out there.. exiting.");
-                        exit(1);
-                    } else {
-                        attempts += 1;
-                        thread::sleep(Duration::from_secs(3));
-                    }
-                }
-            };
+
+        let discovered_pub_keys = session.discover().await;
+        if discovered_pub_keys.len() > 0 {
+            pub_key = Some(discovered_pub_keys[0].clone());
         }
 
         let pub_key: String = pub_key.expect("Failed to discover nodes out there.. exiting..");
@@ -292,76 +259,12 @@ async fn main() {
         };
     }
 
-    if sub {
-        let mut i = 0;
-        WINDOW_MANAGER.printw(1, &format!("-- Awaiting peer to connect..."));
-        session.serve_with_chat().await;
-    } else {
-        let discover_topic = Topic::Discover.as_str();
-        let mut discover_topic_reply = discover_topic.to_string();
-        discover_topic_reply.push_str(Topic::reply_suffix());
-        let timeout_discovery = Duration::from_secs(5);
-
-        let zenoh_session = Arc::new(Mutex::new(zenoh::open(zenoh_config).res().await.unwrap()));
-        let handler = ZenohHandler::new(zenoh_session);
-        let mut cont = true;
-        let mut attempts = 0;
-        let mut pub_key = None;
-        while attempts < 10 && cont {
-            let msg = SessionMessage::new_discovery(pub_key_full.clone());
-            match session
-                .send_and_multi_receive_topic(
-                    msg,
-                    discover_topic,
-                    &discover_topic_reply,
-                    timeout_discovery,
-                    &handler,
-                )
-                .await
-            {
-                Ok(msgs) => {
-                    if msgs.len() == 0 {
-                        attempts += 1;
-                    }
-                    for msg in msgs {
-                        match msg.message {
-                            Discovery(disc_msg) => {
-                                println!("Discovered a node with pub_key: {}", &disc_msg.pub_key);
-                                cont = false;
-                                if pub_key.is_none() {
-                                    pub_key = Some(disc_msg.pub_key);
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                Err(_) => {
-                    println!("Failed to discover any nodes out there.. exiting.");
-                    exit(1);
-                }
-            };
-        }
-
-        let pub_key: String = pub_key.expect("Failed to discover nodes out there.. exiting..");
-        let pub_key_dec = base64::decode(&pub_key).expect("Failed to decode pub_key");
-        let discovered_cert =
-            read_from_vec(&pub_key_dec).expect("Got invalid certificate from discovery");
-        let discovered_pub_key_fingerprint = discovered_cert.fingerprint().to_string();
-
-        println!("Discovered pub_key: {}", &discovered_pub_key_fingerprint);
-        let session_id = match session.initialize_session_zenoh(pub_key.clone()).await {
-            Ok(ok) => ok,
-            Err(not_ok) => {
-                println!("{}", not_ok);
-                println!("error: Failed to initiailize a session.");
-                exit(1);
-            }
-        };
-
-        session
-            .chat(session_id.clone(), &discovered_pub_key_fingerprint, false)
-            .await;
-        session.serve().await;
+    let mut i = 0;
+    WINDOW_MANAGER.printw(1, &format!("-- Using key {}", &pub_key_fingerprint));
+    WINDOW_MANAGER.printw(1, &format!("-- Awaiting peer to connect..."));
+    if !sub {
+        WINDOW_MANAGER.printw(1, "-- Discovering peers...");
+        session.discover().await;
     }
+    session.serve().await;
 }
