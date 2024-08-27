@@ -218,16 +218,6 @@ async fn main() {
 
     let mut session = Session::new(pgp_handler, zenoh_config.clone());
 
-    session.register_callback_chat(Box::new(test_cb_chat)).await;
-    session
-        .register_callback_initialized(Box::new(test_cb_initialized))
-        .await;
-    session
-        .register_callback_discovered(Box::new(test_cb_discovered))
-        .await;
-    session
-        .register_callback_chat_input(Box::new(test_cb_chat_input))
-        .await;
     let zenoh_config = Config::from_file(zenoh_config).unwrap();
 
     if test_receiver {
@@ -264,6 +254,17 @@ async fn main() {
             }
         };
     }
+
+    session.register_callback_chat(Box::new(test_cb_chat)).await;
+    session
+        .register_callback_initialized(Box::new(test_cb_initialized))
+        .await;
+    session
+        .register_callback_discovered(Box::new(test_cb_discovered))
+        .await;
+    session
+        .register_callback_chat_input(Box::new(test_cb_chat_input))
+        .await;
 
     let mut i = 0;
     WINDOW_MANAGER.printw(1, &format!("-- Using key {}", &pub_key_fingerprint));
