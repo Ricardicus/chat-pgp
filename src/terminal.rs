@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::marker::PhantomData;
 
 pub struct WindowManager {
-    windows: HashMap<usize, WINDOW>,
+    windows: HashMap<usize, (WINDOW, WINDOW)>,
     num_windows: usize,
     _marker: PhantomData<*const ()>, // Marker for Send and Sync
 }
@@ -34,10 +34,11 @@ impl WindowManager {
         for i in 0..num_windows {
             let start_y = i as i32 * win_height;
             let win = newwin(win_height, win_width, start_y, 0);
-            scrollok(win, true); // Enable scrolling for the window
+            let subwin = derwin(win, win_height - 2, win_width - 2, 1, 1);
+            scrollok(subwin, true); // Enable scrolling for the window
             box_(win, 0, 0); // Draw a box around the window
             wrefresh(win); // Refresh the window to apply the box
-            windows.insert(i, win);
+            windows.insert(i, (win, subwin));
         }
 
         WindowManager {
@@ -49,10 +50,10 @@ impl WindowManager {
 
     // Print a message to a specific window
     pub fn printw(&self, window_number: usize, message: &str) {
-        if let Some(win) = self.windows.get(&window_number) {
+        if let Some((win, subwin)) = self.windows.get(&window_number) {
             // Print the message in the window
-            mvwprintw(*win, getcury(*win) + 1, 1, message);
-            wrefresh(*win); // Refresh the window to display the new content
+            mvwprintw(*subwin, getcury(*subwin) + 1, 1, message);
+            wrefresh(*subwin); // Refresh the window to display the new content
         } else {
             println!("Window number {} does not exist.", window_number);
         }
@@ -60,13 +61,16 @@ impl WindowManager {
 
     // Make window interactive
     pub fn getch(&self, window_number: usize, prompt: &str) -> String {
-        if let Some(win) = self.windows.get(&window_number) {
+        if let Some((win, subwin)) = self.windows.get(&window_number) {
             loop {
+                box_(*win, 0, 0);
+                wrefresh(*subwin);
+
                 // Move the cursor to just inside the box, 1 line down, 1 column in
-                wmove(*win, getcury(*win), 1);
+                wmove(*subwin, getcury(*subwin), 1);
                 self.printw(window_number, prompt);
-                wmove(*win, getcury(*win), (prompt.len() + 1) as i32);
-                wrefresh(*win);
+                wmove(*subwin, getcury(*subwin), (prompt.len() + 1) as i32);
+                wrefresh(*subwin);
 
                 let mut input = String::new();
                 nocbreak();
@@ -74,23 +78,19 @@ impl WindowManager {
                 curs_set(CURSOR_VISIBILITY::CURSOR_VISIBLE);
 
                 // Handle user input
-                let mut ch = wgetch(*win);
+                let mut ch = wgetch(*subwin);
                 while ch != '\n' as i32 {
                     if ch == KEY_BACKSPACE || ch == 127 {
                         if !input.is_empty() {
                             input.pop();
-                            wdelch(*win);
+                            wdelch(*subwin);
                         }
                     } else {
                         input.push(char::from_u32(ch as u32).unwrap());
                     }
-                    wrefresh(*win);
-                    ch = wgetch(*win);
+                    wrefresh(*subwin);
+                    ch = wgetch(*subwin);
                 }
-
-                // Redraw the box after every input to maintain the boundaries
-                box_(*win, 0, 0);
-                wrefresh(*win);
 
                 // Exit condition (optional)
                 return input;
@@ -103,7 +103,8 @@ impl WindowManager {
 
     // Clean up ncurses
     pub fn cleanup(&self) {
-        for (_, win) in &self.windows {
+        for (_, (win, subwin)) in &self.windows {
+            delwin(*subwin);
             delwin(*win);
         }
         endwin(); // End ncurses mode

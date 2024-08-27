@@ -68,6 +68,7 @@ pub enum SessionErrorCodes {
     Encryption = 4,
     Timeout = 5,
     Protocol = 6,
+    NotAccepted = 7,
 }
 
 #[derive(Serialize, Deserialize, Clone)]

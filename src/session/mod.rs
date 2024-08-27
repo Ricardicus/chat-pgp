@@ -75,7 +75,7 @@ where
     pub rx: mpsc::Receiver<(String, String)>,
     pub callbacks_chat: Arc<Mutex<Vec<Box<dyn Fn(&str, &str) + Send>>>>,
     pub callbacks_discovered: Arc<Mutex<Vec<Box<dyn Fn(&str) -> bool + Send>>>>,
-    pub callbacks_initialized: Arc<Mutex<Vec<Box<dyn Fn(&str) + Send>>>>,
+    pub callbacks_initialized: Arc<Mutex<Vec<Box<dyn Fn(&str) -> bool + Send>>>>,
     pub callbacks_chat_input:
         Arc<Mutex<Vec<Box<dyn Fn(&str, &str, &str) -> (String, String) + Send + Sync>>>>,
 
@@ -167,7 +167,7 @@ impl<'a> Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt<'a>> {
         let mut callbacks = self.callbacks_discovered.lock().await;
         callbacks.push(callback);
     }
-    pub async fn register_callback_initialized(&self, callback: Box<dyn Fn(&str) + Send>) {
+    pub async fn register_callback_initialized(&self, callback: Box<dyn Fn(&str) -> bool + Send>) {
         let mut callbacks = self.callbacks_initialized.lock().await;
         callbacks.push(callback);
     }
@@ -185,30 +185,33 @@ impl<'a> Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt<'a>> {
             callback(arg1, arg2);
         }
     }
-    async fn call_callbacks_initialized(&self, arg1: &str) {
+    async fn call_callbacks_initialized(&self, arg1: &str) -> bool {
         let callbacks = self.callbacks_initialized.lock().await;
         for callback in callbacks.iter() {
-            callback(arg1);
+            if !callback(arg1) {
+                return false;
+            }
         }
+        true
     }
     async fn call_callbacks_discovered(&self, arg1: &str) -> bool {
         let callbacks = self.callbacks_discovered.lock().await;
         for callback in callbacks.iter() {
-            let shall_initialize = callback(arg1);
-            if shall_initialize {
-                return true;
+            if !callback(arg1) {
+                return false;
             }
         }
-        false
+        true
     }
 
-    pub async fn initialize_session_zenoh(&self, pub_key: String) -> Result<String, String> {
+    pub async fn initialize_session_zenoh(&mut self, pub_key: String) -> Result<String, String> {
         let pub_key_dec = base64::decode(&pub_key).expect("Failed to decode pub_key");
         let cert = read_from_vec(&pub_key_dec);
         if cert.is_err() {
             return Err("Failed to parse public key".to_owned());
         }
         let cert = cert.unwrap();
+        let other_key_fingerprint = cert.fingerprint().to_string();
         let message = Message {
             message: MessageData::Init(InitMsg {
                 pub_key: self.host_encro.lock().await.get_public_key_as_base64(),
@@ -223,7 +226,7 @@ impl<'a> Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt<'a>> {
         let zenoh_session = Arc::new(Mutex::new(zenoh::open(zenoh_config).res().await.unwrap()));
         let handler = ZenohHandler::new(zenoh_session);
 
-        let await_response_interval = Duration::from_secs(5);
+        let await_response_interval = Duration::from_secs(60);
 
         let mut topic_reply = topic.clone();
         topic_reply.push_str(Topic::reply_suffix());
@@ -245,20 +248,27 @@ impl<'a> Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt<'a>> {
                                 return Err("Failed to decrypt session key".to_owned());
                             }
                         };
-                        let cipher = ChaCha20Poly1305EnDeCrypt::new_from_str(&sym_key);
-                        let key = session_id;
-                        let session_data = SessionData {
-                            id: key.clone(),
-                            last_active: SystemTime::now(),
-                            state: SessionState::Active,
-                            messages: Vec::new(),
-                            sym_encro: cipher,
-                            pub_key: pub_key.clone(),
-                        };
-                        let mut hm = self.sessions.lock().await;
-                        hm.insert(key.clone(), session_data);
-                        self.call_callbacks_initialized(&pub_key).await;
-                        return Ok(key);
+                        let initialize_this = self.call_callbacks_initialized(&pub_key).await;
+                        if initialize_this {
+                            let cipher = ChaCha20Poly1305EnDeCrypt::new_from_str(&sym_key);
+                            let key = session_id;
+                            let session_data = SessionData {
+                                id: key.clone(),
+                                last_active: SystemTime::now(),
+                                state: SessionState::Active,
+                                messages: Vec::new(),
+                                sym_encro: cipher,
+                                pub_key: pub_key.clone(),
+                            };
+                            {
+                                let mut hm = self.sessions.lock().await;
+                                hm.insert(key.clone(), session_data);
+                            }
+                            self.chat(key.clone(), &other_key_fingerprint, false).await;
+                            return Ok(key);
+                        } else {
+                            return Err("Session not initialized, not accepted".to_owned());
+                        }
                     }
                     _ => {
                         return Err("Failed to initialize session".to_owned());
@@ -514,9 +524,6 @@ impl<'a> Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt<'a>> {
         let mut discover_topic_reply = discover_topic.to_string();
         discover_topic_reply.push_str(Topic::reply_suffix());
         let timeout_discovery = Duration::from_secs(5);
-        let mut cont = true;
-        let mut attempts = 0;
-        let maxattempts = 10;
         let mut pub_keys = Vec::new();
 
         let zc = self.middleware_config.clone();
@@ -528,67 +535,51 @@ impl<'a> Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt<'a>> {
         {
             this_pub_key = Some(self.host_encro.lock().await.get_public_key_as_base64());
         }
-        while attempts < maxattempts && cont {
-            let msg = Message::new_discovery(this_pub_key.clone().unwrap());
-            match self
-                .send_and_multi_receive_topic(
-                    msg,
-                    discover_topic,
-                    &discover_topic_reply,
-                    timeout_discovery,
-                    &handler,
-                )
-                .await
-            {
-                Ok(msgs) => {
-                    if msgs.len() == 0 {
-                        attempts += 1;
-                    } else {
-                        cont = false;
-                    }
-                    for msg in msgs {
-                        match msg.message {
-                            Discovery(disc_msg) => {
-                                let pub_key = disc_msg.pub_key.clone();
-                                if !pub_keys.contains(&pub_key) {
-                                    let pub_key_dec =
-                                        base64::decode(&pub_key).expect("Failed to decode pub_key");
-                                    let discovered_cert = read_from_vec(&pub_key_dec)
-                                        .expect("Got invalid certificate from discovery");
-                                    let discovered_pub_key_fingerprint =
-                                        discovered_cert.fingerprint().to_string();
+        let msg = Message::new_discovery(this_pub_key.clone().unwrap());
+        match self
+            .send_and_multi_receive_topic(
+                msg,
+                discover_topic,
+                &discover_topic_reply,
+                timeout_discovery,
+                &handler,
+            )
+            .await
+        {
+            Ok(msgs) => {
+                for msg in msgs {
+                    match msg.message {
+                        Discovery(disc_msg) => {
+                            let pub_key = disc_msg.pub_key.clone();
+                            if !pub_keys.contains(&pub_key) {
+                                let pub_key_dec =
+                                    base64::decode(&pub_key).expect("Failed to decode pub_key");
+                                let discovered_cert = read_from_vec(&pub_key_dec)
+                                    .expect("Got invalid certificate from discovery");
+                                let discovered_pub_key_fingerprint =
+                                    discovered_cert.fingerprint().to_string();
+                                let not_ignore = self.call_callbacks_discovered(&pub_key).await;
+                                if not_ignore {
                                     pub_keys.push(disc_msg.pub_key);
-                                    let shall_initialize =
-                                        self.call_callbacks_discovered(&pub_key).await;
-                                    if shall_initialize {
-                                        if let Ok(session_id) =
-                                            self.initialize_session_zenoh(pub_key.clone()).await
-                                        {
-                                            self.chat(
-                                                session_id.clone(),
-                                                &discovered_pub_key_fingerprint,
-                                                false,
-                                            )
-                                            .await;
-                                        }
-                                    }
+                                    /*if let Ok(session_id) =
+                                        self.initialize_session_zenoh(pub_key.clone()).await
+                                    {
+                                        self.chat(
+                                            session_id.clone(),
+                                            &discovered_pub_key_fingerprint,
+                                            false,
+                                        )
+                                        .await;
+                                    }*/
                                 }
                             }
-                            _ => {}
                         }
+                        _ => {}
                     }
                 }
-                Err(_) => {
-                    if attempts >= maxattempts {
-                        println!("Failed to discover any nodes out there.. exiting.");
-                        exit(1);
-                    } else {
-                        attempts += 1;
-                        thread::sleep(Duration::from_secs(3));
-                    }
-                }
-            };
-        }
+            }
+            Err(_) => {}
+        };
         pub_keys
     }
 
@@ -734,18 +725,27 @@ impl<'a> Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt<'a>> {
                             messages: Vec::new(),
                             sym_encro: sym_cipher,
                         };
-                        {
-                            let mut hm = self.sessions.lock().await;
-                            hm.insert(key.clone(), session_data);
-                            self.call_callbacks_initialized(&pub_key).await;
+                        let initialize_this = self.call_callbacks_initialized(&pub_key).await;
+
+                        if initialize_this {
+                            {
+                                let mut hm = self.sessions.lock().await;
+                                hm.insert(key.clone(), session_data);
+                            }
+
+                            response.message = MessageData::InitOk(InitOkMsg {
+                                sym_key: sym_cipher_key_encrypted,
+                                orig_pub_key: pub_encro.get_public_key_as_base64(),
+                            });
+                            response.session_id = key.clone();
+                            self.chat(key.clone(), &pk_1, false).await;
+                            Ok((response, topic_response))
+                        } else {
+                            Err(SessionErrorMsg {
+                                code: SessionErrorCodes::NotAccepted as u32,
+                                message: "Session initialization not accepted".to_owned(),
+                            })
                         }
-                        response.message = MessageData::InitOk(InitOkMsg {
-                            sym_key: sym_cipher_key_encrypted,
-                            orig_pub_key: pub_encro.get_public_key_as_base64(),
-                        });
-                        response.session_id = key.clone();
-                        self.chat(key.clone(), &pk_1, false).await;
-                        Ok((response, topic_response))
                     }
                     Err(_) => Err(SessionErrorMsg {
                         code: SessionErrorCodes::InvalidPublicKey as u32,
