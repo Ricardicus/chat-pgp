@@ -14,6 +14,11 @@ encryption. If you are unfamiliar with OpenPGP and using GnuPG then see this [Gn
 
 The communication protocol is built on [Zenoh](https://github.com/eclipse-zenoh/zenoh).
 
+Zenoh is an extremely flexible middleware that does not force a network topology onto
+the project. By providing a configuration file to zenoh, one can configure an entire network
+of routers oneself: so that one does not have to rely on routers and peers I setup for
+this project. There is support for TLS (one- and two-way) authentication.
+
 ## Work in progress
 
 This is a work in progress. So far I have this:
@@ -23,8 +28,8 @@ This is a work in progress. So far I have this:
 
 Will work on this:
 
-- Web front end + API:ification of the Rust backend.
-- Better terminal interface
+- Better terminal interface (ncurses) in the near term
+- Web front end (on localhost) in the long term
 
 Please feel free to test and come with feedback. This project is in its early stage
 and I would appreciate contributions if you agree with this vision.
