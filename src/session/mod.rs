@@ -34,10 +34,10 @@ use middleware::ZenohHandler;
 
 use crate::pgp::pgp::read_from_vec;
 
+use async_recursion::async_recursion;
 use futures::prelude::*;
 use zenoh::prelude::r#async::*;
-
-use async_recursion::async_recursion;
+use zenoh::Config;
 
 #[derive(PartialEq)]
 pub enum SessionState {

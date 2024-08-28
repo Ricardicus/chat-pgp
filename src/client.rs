@@ -15,6 +15,7 @@ use std::process::exit;
 use std::thread;
 use zenoh::prelude::r#async::*;
 use zenoh::prelude::*;
+use zenoh::Config;
 
 use std::sync::Arc;
 use std::time::Duration;
