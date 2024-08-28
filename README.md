@@ -30,6 +30,8 @@ Will work on this:
 
 - Better terminal interface (ncurses) in the near term
 - Web front end (on localhost) in the long term
+- Apply local gpg keychain as policy for session key verification
+- PGP session key signed by main key instead of using the main key for each session establishment
 
 Please feel free to test and come with feedback. This project is in its early stage
 and I would appreciate contributions if you agree with this vision.
