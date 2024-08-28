@@ -17,7 +17,7 @@ The communication protocol is built on [Zenoh](https://github.com/eclipse-zenoh/
 Zenoh is an extremely flexible middleware that does not force a network topology onto
 the project. By providing a configuration file to zenoh, one can configure an entire network
 of routers oneself: so that one does not have to rely on routers and peers I setup for
-this project. There is support for TLS (one- and two-way) authentication.
+this project. There is support for TLS (one- and two-way) authentication in zenoh.
 
 ## Work in progress
 
