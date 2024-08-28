@@ -25,7 +25,7 @@ This is a work in progress. So far I have this:
 
 - PGP assymetrical encryption using pre-existing pgp-keys (you can create them with gpg)
 - Communcations based on Zenoh
-- Encrypted one-to-one encyrpted live chat in terminal (ncurses) interface.
+- Encrypted one-to-one encrypted live chat in terminal (ncurses) interface.
 
 Will work on this:
 
