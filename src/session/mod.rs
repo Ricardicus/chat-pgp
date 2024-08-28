@@ -76,6 +76,7 @@ where
     pub callbacks_chat: Arc<Mutex<Vec<Box<dyn Fn(&str, &str) + Send>>>>,
     pub callbacks_discovered: Arc<Mutex<Vec<Box<dyn Fn(&str) -> bool + Send>>>>,
     pub callbacks_initialized: Arc<Mutex<Vec<Box<dyn Fn(&str) -> bool + Send>>>>,
+    pub callbacks_terminate: Arc<Mutex<Vec<Box<dyn Fn() + Send>>>>,
     pub callbacks_chat_input:
         Arc<Mutex<Vec<Box<dyn Fn(&str, &str, &str) -> (String, String) + Send + Sync>>>>,
 
@@ -93,6 +94,7 @@ impl<'a> Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt<'a>> {
             callbacks_chat: Arc::new(Mutex::new(Vec::new())),
             callbacks_discovered: Arc::new(Mutex::new(Vec::new())),
             callbacks_initialized: Arc::new(Mutex::new(Vec::new())),
+            callbacks_terminate: Arc::new(Mutex::new(Vec::new())),
             callbacks_chat_input: Arc::new(Mutex::new(Vec::new())),
             middleware_config,
         }
@@ -106,6 +108,10 @@ impl<'a> Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt<'a>> {
             Ok(message) => Ok(message),
             Err(error_msg) => Err(error_msg),
         }
+    }
+
+    pub async fn get_tx(&self) -> mpsc::Sender<(String, String)> {
+        self.tx.clone()
     }
 
     pub async fn encrypt_msg(
@@ -171,6 +177,10 @@ impl<'a> Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt<'a>> {
         let mut callbacks = self.callbacks_initialized.lock().await;
         callbacks.push(callback);
     }
+    pub async fn register_callback_terminate(&self, callback: Box<dyn Fn() + Send>) {
+        let mut callbacks = self.callbacks_terminate.lock().await;
+        callbacks.push(callback);
+    }
     pub async fn register_callback_chat_input(
         &self,
         callback: Box<dyn Fn(&str, &str, &str) -> (String, String) + Send + Sync>,
@@ -183,6 +193,12 @@ impl<'a> Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt<'a>> {
         let callbacks = self.callbacks_chat.lock().await;
         for callback in callbacks.iter() {
             callback(arg1, arg2);
+        }
+    }
+    async fn call_callbacks_terminate(&self) {
+        let callbacks = self.callbacks_terminate.lock().await;
+        for callback in callbacks.iter() {
+            callback();
         }
     }
     async fn call_callbacks_initialized(&self, arg1: &str) -> bool {
@@ -346,10 +362,19 @@ impl<'a> Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt<'a>> {
             let t = topic.clone();
             let zc = self.middleware_config.clone();
 
+            let terminate_callbacks = self.callbacks_terminate.clone();
             let h = tokio::spawn(async move {
                 let zenoh_config = Config::from_file(zc).unwrap();
-                let zenoh_session =
-                    Arc::new(Mutex::new(zenoh::open(zenoh_config).res().await.unwrap()));
+                let zenoh_session = zenoh::open(zenoh_config.clone()).res().await;
+
+                if zenoh_session.is_err() {
+                    let callbacks = terminate_callbacks.lock().await;
+                    for callback in callbacks.iter() {
+                        callback();
+                    }
+                    return false;
+                }
+                let zenoh_session = Arc::new(Mutex::new(zenoh_session.unwrap()));
                 let handler = ZenohHandler::new(zenoh_session);
                 let mut keep_alive = true;
                 while keep_alive {
@@ -561,16 +586,6 @@ impl<'a> Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt<'a>> {
                                 let not_ignore = self.call_callbacks_discovered(&pub_key).await;
                                 if not_ignore {
                                     pub_keys.push(disc_msg.pub_key);
-                                    /*if let Ok(session_id) =
-                                        self.initialize_session_zenoh(pub_key.clone()).await
-                                    {
-                                        self.chat(
-                                            session_id.clone(),
-                                            &discovered_pub_key_fingerprint,
-                                            false,
-                                        )
-                                        .await;
-                                    }*/
                                 }
                             }
                         }
@@ -656,6 +671,11 @@ impl<'a> Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt<'a>> {
         match message.message {
             Internal(msg) => {
                 if topic == Topic::Internal.as_str() {
+                    if message.session_id == "internal" && msg.message == "terminate" {
+                        self.call_callbacks_terminate().await;
+                        exit(0);
+                    }
+
                     let session_id = message.session_id.clone();
                     let message = Message {
                         message: MessageData::Chat(ChatMsg {

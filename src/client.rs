@@ -69,12 +69,9 @@ struct Cli {
 }
 
 // Create a global instance of WindowManager
-static WINDOW_MANAGER: Lazy<WindowManager> = Lazy::new(|| {
-    let manager = WindowManager::init(2);
-    manager
-});
+static WINDOW_MANAGER: Lazy<WindowManager> = Lazy::new(|| WindowManager::init(2));
 
-fn test_cb_chat(public_key: &str, message: &str) {
+fn cb_chat(public_key: &str, message: &str) {
     let pub_key_decoded = match base64::decode(public_key) {
         Err(_) => {
             return;
@@ -97,7 +94,7 @@ fn test_cb_chat(public_key: &str, message: &str) {
     }
 }
 
-fn test_cb_chat_input(
+fn cb_chat_input(
     _pub_key_fingerprint: &str,
     session_id: &str,
     topic_out: &str,
@@ -106,15 +103,23 @@ fn test_cb_chat_input(
     let input = WINDOW_MANAGER.getch(1, &prompt);
     let input = input.trim();
     let topic = Topic::Internal.as_str();
-    let msg = SessionMessage::new_internal(
+    let mut msg = SessionMessage::new_internal(
         session_id.to_string(),
         input.to_string(),
         topic_out.to_string(),
     );
-    (topic.to_string(), msg.serialize().unwrap())
+    if input == "!exit" {
+        // Special message that terminate the session
+        msg = SessionMessage::new_internal(
+            "internal".to_owned(),
+            "terminate".to_owned(),
+            topic.to_string(),
+        );
+    }
+    return (topic.to_string(), msg.serialize().unwrap());
 }
 
-fn test_cb_discovered(public_key: &str) -> bool {
+fn cb_discovered(public_key: &str) -> bool {
     let pub_key_decoded = match base64::decode(public_key) {
         Err(_) => {
             return false;
@@ -137,7 +142,11 @@ fn test_cb_discovered(public_key: &str) -> bool {
     }
 }
 
-fn test_cb_initialized(public_key: &str) -> bool {
+fn cb_terminate() {
+    WINDOW_MANAGER.cleanup();
+}
+
+fn cb_initialized(public_key: &str) -> bool {
     let pub_key_decoded = match base64::decode(public_key) {
         Err(_) => {
             return false;
@@ -160,6 +169,7 @@ fn test_cb_initialized(public_key: &str) -> bool {
             );
             let input = WINDOW_MANAGER.getch(1, ">> ");
             if input.to_lowercase().starts_with('y') {
+                WINDOW_MANAGER.printw(1, "-- Chat initialized, exit by typing '!exit'");
                 return true;
             } else {
                 WINDOW_MANAGER.printw(1, "-- chat not accepted");
@@ -171,6 +181,18 @@ fn test_cb_initialized(public_key: &str) -> bool {
             false
         }
     }
+}
+
+fn terminate(tx: mpsc::Sender<(String, String)>) {
+    tokio::spawn(async move {
+        let topic = Topic::Internal.as_str();
+        let msg = SessionMessage::new_internal(
+            "internal".to_owned(),
+            "terminate".to_owned(),
+            topic.to_string(),
+        );
+        tx.send((topic.to_string(), msg.to_string())).await;
+    });
 }
 
 #[tokio::main]
@@ -255,15 +277,18 @@ async fn main() {
         };
     }
 
-    session.register_callback_chat(Box::new(test_cb_chat)).await;
+    session.register_callback_chat(Box::new(cb_chat)).await;
     session
-        .register_callback_initialized(Box::new(test_cb_initialized))
+        .register_callback_initialized(Box::new(cb_initialized))
         .await;
     session
-        .register_callback_discovered(Box::new(test_cb_discovered))
+        .register_callback_discovered(Box::new(cb_discovered))
         .await;
     session
-        .register_callback_chat_input(Box::new(test_cb_chat_input))
+        .register_callback_chat_input(Box::new(cb_chat_input))
+        .await;
+    session
+        .register_callback_terminate(Box::new(cb_terminate))
         .await;
 
     let mut i = 0;
@@ -357,6 +382,13 @@ async fn main() {
     } else {
         WINDOW_MANAGER.printw(1, &format!("-- Awaiting connection requests from peers..."));
     }
+
+    let tx = session.get_tx().await;
+    ctrlc_async::set_handler(move || {
+        let tx_clone = tx.clone();
+        terminate(tx_clone);
+    })
+    .expect("Error setting Ctrl-C handler");
 
     session.serve().await;
 }

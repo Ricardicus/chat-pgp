@@ -68,11 +68,11 @@ impl WindowManager {
 
                 // Move the cursor to just inside the box, 1 line down, 1 column in
                 wmove(*subwin, getcury(*subwin), 1);
-                self.printw(window_number, prompt);
                 wmove(*subwin, getcury(*subwin), (prompt.len() + 1) as i32);
+                self.printw(window_number, prompt);
                 wrefresh(*subwin);
 
-                let mut input = String::new();
+                let mut input = Vec::<u8>::new();
                 nocbreak();
                 echo();
                 curs_set(CURSOR_VISIBILITY::CURSOR_VISIBLE);
@@ -86,14 +86,14 @@ impl WindowManager {
                             wdelch(*subwin);
                         }
                     } else {
-                        input.push(char::from_u32(ch as u32).unwrap());
+                        input.push(ch as u8);
                     }
                     wrefresh(*subwin);
                     ch = wgetch(*subwin);
                 }
 
                 // Exit condition (optional)
-                return input;
+                return std::str::from_utf8(input.as_slice()).unwrap().to_string();
             }
         } else {
             println!("Window number {} does not exist.", window_number);
