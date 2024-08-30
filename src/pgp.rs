@@ -6,6 +6,7 @@ pub mod pgp {
     use openpgp::cert::prelude::*;
     use openpgp::crypto::Password;
     use std::io::{self, Write};
+    use std::sync::Arc;
 
     use openpgp::crypto::SessionKey;
     use openpgp::parse::stream::MessageLayer;
@@ -101,7 +102,7 @@ pub mod pgp {
         Ok(())
     }
 
-    pub fn get_public_key_as_base64(cert: &Cert) -> String {
+    pub fn get_public_key_as_base64(cert: Arc<Cert>) -> String {
         // Serializing a `Key<key::PublicParts, _>` drops the secret key
         // material.
         let mut bytes = Vec::new();
@@ -184,7 +185,7 @@ pub mod pgp {
         policy: &dyn Policy,
         sink: &mut (dyn Write + Send + Sync),
         plaintext: &str,
-        recipient: &openpgp::Cert,
+        recipient: Arc<openpgp::Cert>,
     ) -> openpgp::Result<()> {
         let recipients = recipient
             .keys()
@@ -219,7 +220,7 @@ pub mod pgp {
         policy: &dyn Policy,
         sink: &mut dyn Write,
         ciphertext: &[u8],
-        cert: &openpgp::Cert,
+        cert: Arc<openpgp::Cert>,
         cert_passphrase: &str,
     ) -> openpgp::Result<()> {
         // Make a helper that that feeds the recipient's secret key to the
@@ -236,21 +237,21 @@ pub mod pgp {
         Ok(())
     }
 
-    struct DeHelper<'a> {
-        cert: &'a openpgp::Cert,
+    struct DeHelper {
+        cert: Arc<openpgp::Cert>,
         passphrase: Password,
     }
 
-    impl<'a> DeHelper<'a> {
+    impl DeHelper {
         /// Creates a Helper for the given Certs with appropriate secrets.
-        fn new(cert: &'a openpgp::Cert, passphrase: &str) -> Self {
+        fn new(cert: Arc<openpgp::Cert>, passphrase: &str) -> Self {
             // Map (sub)KeyIDs to primary fingerprints and secrets.
             let passphrase: Password = String::from(passphrase).into();
             DeHelper { cert, passphrase }
         }
     }
 
-    impl DecryptionHelper for DeHelper<'_> {
+    impl DecryptionHelper for DeHelper {
         fn decrypt<D>(
             &mut self,
             pkesks: &[openpgp::packet::PKESK],
@@ -306,7 +307,7 @@ pub mod pgp {
         }
     }
 
-    impl VerificationHelper for DeHelper<'_> {
+    impl VerificationHelper for DeHelper {
         fn get_certs(
             &mut self,
             _ids: &[openpgp::KeyHandle],

@@ -70,8 +70,10 @@ where
     HostCrypto: CrypticalEncrypt + CrypticalDecrypt,
 {
     pub sessions: Arc<Mutex<HashMap<String, SessionData<SessionCrypto>>>>,
+    pub discovered: Arc<Mutex<HashMap<String, String>>>,
     pub host_encro: Arc<Mutex<HostCrypto>>,
     pub tx: mpsc::Sender<(String, String)>,
+    pub tx_chat: mpsc::Sender<(String, String)>,
     pub rx: mpsc::Receiver<(String, String)>,
     pub callbacks_chat: Arc<Mutex<Vec<Box<dyn Fn(&str, &str) + Send>>>>,
     pub callbacks_discovered: Arc<Mutex<Vec<Box<dyn Fn(&str) -> bool + Send>>>>,
@@ -83,13 +85,15 @@ where
     pub middleware_config: String,
 }
 
-impl<'a> Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt<'a>> {
-    pub fn new(host_encro: PGPEnDeCrypt<'a>, middleware_config: String) -> Self {
+impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
+    pub fn new(host_encro: PGPEnDeCrypt, middleware_config: String) -> Self {
         let (tx, mut rx) = mpsc::channel(100);
         Session {
             sessions: Arc::new(Mutex::new(HashMap::new())),
+            discovered: Arc::new(Mutex::new(HashMap::new())),
             host_encro: Arc::new(Mutex::new(host_encro)),
-            tx,
+            tx: tx.clone(),
+            tx_chat: tx.clone(),
             rx,
             callbacks_chat: Arc::new(Mutex::new(Vec::new())),
             callbacks_discovered: Arc::new(Mutex::new(Vec::new())),
@@ -98,6 +102,28 @@ impl<'a> Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt<'a>> {
             callbacks_chat_input: Arc::new(Mutex::new(Vec::new())),
             middleware_config,
         }
+    }
+
+    pub fn clone(&self) -> Self {
+        let (tx, mut rx) = mpsc::channel(100);
+        Self {
+            sessions: Arc::clone(&self.sessions),
+            discovered: Arc::clone(&self.discovered),
+            host_encro: Arc::clone(&self.host_encro),
+            tx,
+            tx_chat: self.tx_chat.clone(),
+            rx,
+            callbacks_chat: Arc::clone(&self.callbacks_chat),
+            callbacks_discovered: Arc::clone(&self.callbacks_discovered),
+            callbacks_initialized: Arc::clone(&self.callbacks_initialized),
+            callbacks_terminate: Arc::clone(&self.callbacks_terminate),
+            callbacks_chat_input: Arc::clone(&self.callbacks_chat_input),
+            middleware_config: self.middleware_config.clone(),
+        }
+    }
+
+    pub fn set_tx_chat(&mut self, tx: mpsc::Sender<(String, String)>) {
+        self.tx_chat = tx;
     }
 
     pub fn session_recv_msg<T: MessageListener>(
@@ -297,58 +323,6 @@ impl<'a> Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt<'a>> {
         }
     }
 
-    pub async fn initialize_session<T: MessageListener + Messageble>(
-        &mut self,
-        client: &T,
-    ) -> Result<String, String> {
-        let pub_key = self.host_encro.lock().await.get_public_key_as_base64();
-        let message = Message {
-            message: MessageData::Init(InitMsg {
-                pub_key: pub_key.clone(),
-            }),
-            session_id: "".to_string(),
-        };
-        match client.send_message(message) {
-            Ok(_) => {}
-            Err(_) => {
-                return Err("Failed to send message".to_owned());
-            }
-        }
-
-        match client.listen() {
-            Ok(message) => match message.message {
-                InitOk(msg) => {
-                    let sym_key_encrypted = msg.sym_key;
-                    let sym_key = match self.host_encro.lock().await.decrypt(&sym_key_encrypted) {
-                        Ok(res) => res,
-                        Err(_) => {
-                            return Err("Failed to decrypt session key".to_owned());
-                        }
-                    };
-                    let cipher = ChaCha20Poly1305EnDeCrypt::new_from_str(&sym_key);
-                    let key = message.session_id.clone();
-                    let session_data = SessionData {
-                        id: key.clone(),
-                        last_active: SystemTime::now(),
-                        state: SessionState::Active,
-                        messages: Vec::new(),
-                        sym_encro: cipher,
-                        pub_key: pub_key.clone(),
-                    };
-                    let mut hm = self.sessions.lock().await;
-                    hm.insert(key.clone(), session_data);
-                    return Ok(key);
-                }
-                _ => {
-                    return Err("Failed to initialize session".to_owned());
-                }
-            },
-            Err(_) => {
-                return Err("Failed to initialize session".to_owned());
-            }
-        };
-    }
-
     pub async fn serve_topics(
         &mut self,
         topics: Vec<String>,
@@ -402,7 +376,7 @@ impl<'a> Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt<'a>> {
         let mut topics: Vec<String> = Vec::new();
         topics.push(topic_in);
 
-        let tx_clone = self.tx.clone();
+        let tx_clone = self.tx_chat.clone();
         self.serve_topics(topics, &tx_clone, false).await;
 
         let other_key_fingerprint: String = other_key_fingerprint.to_string();
@@ -432,8 +406,13 @@ impl<'a> Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt<'a>> {
         init_topic.push_str("/");
         init_topic.push_str(&pub_key);
 
+        let discover_topic = Topic::Discover.as_str();
+        let mut discover_topic_reply = discover_topic.to_string();
+        discover_topic_reply.push_str(Topic::reply_suffix());
+
         topics_to_subscribe.push(init_topic);
         topics_to_subscribe.push(Topic::Discover.as_str().to_owned());
+        topics_to_subscribe.push(discover_topic_reply);
 
         let tx_clone = self.tx.clone();
         self.serve_topics(topics_to_subscribe, &tx_clone, false)
@@ -544,12 +523,20 @@ impl<'a> Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt<'a>> {
         }
     }
 
-    pub async fn discover(&mut self) -> Vec<String> {
+    pub async fn get_discovered(&self) -> Vec<String> {
+        let discovered = self.discovered.lock().await;
+        let mut discovered_keys = Vec::new();
+        for (fingerprint, key) in discovered.iter() {
+            discovered_keys.push(key.clone());
+        }
+        discovered_keys
+    }
+
+    pub async fn discover(&mut self) -> Result<(), MessagingError> {
         let discover_topic = Topic::Discover.as_str();
         let mut discover_topic_reply = discover_topic.to_string();
         discover_topic_reply.push_str(Topic::reply_suffix());
         let timeout_discovery = Duration::from_secs(5);
-        let mut pub_keys = Vec::new();
 
         let zc = self.middleware_config.clone();
         let zenoh_config = Config::from_file(zc).unwrap();
@@ -561,41 +548,8 @@ impl<'a> Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt<'a>> {
             this_pub_key = Some(self.host_encro.lock().await.get_public_key_as_base64());
         }
         let msg = Message::new_discovery(this_pub_key.clone().unwrap());
-        match self
-            .send_and_multi_receive_topic(
-                msg,
-                discover_topic,
-                &discover_topic_reply,
-                timeout_discovery,
-                &handler,
-            )
-            .await
-        {
-            Ok(msgs) => {
-                for msg in msgs {
-                    match msg.message {
-                        Discovery(disc_msg) => {
-                            let pub_key = disc_msg.pub_key.clone();
-                            if !pub_keys.contains(&pub_key) {
-                                let pub_key_dec =
-                                    base64::decode(&pub_key).expect("Failed to decode pub_key");
-                                let discovered_cert = read_from_vec(&pub_key_dec)
-                                    .expect("Got invalid certificate from discovery");
-                                let discovered_pub_key_fingerprint =
-                                    discovered_cert.fingerprint().to_string();
-                                let not_ignore = self.call_callbacks_discovered(&pub_key).await;
-                                if not_ignore {
-                                    pub_keys.push(disc_msg.pub_key);
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            Err(_) => {}
-        };
-        pub_keys
+        self.send(msg, discover_topic, &handler).await?;
+        Ok(())
     }
 
     pub async fn send_and_receive_topic<
@@ -630,6 +584,19 @@ impl<'a> Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt<'a>> {
             Err(error) => return Err(MessagingError::UnreachableHost),
         };
         gateway.read_messages_timeout(topic_rx, timeout).await
+    }
+
+    pub async fn send<T: MessagebleTopicAsync + MessagebleTopicAsyncReadTimeout>(
+        &mut self,
+        send_msg: Message,
+        topic_tx: &str,
+        gateway: &T,
+    ) -> Result<(), MessagingError> {
+        match gateway.send_message(topic_tx, send_msg).await {
+            Ok(_) => {}
+            Err(error) => return Err(MessagingError::UnreachableHost),
+        };
+        Ok(())
     }
 
     pub fn parse_message(message: &str) -> Result<Message, SessionErrorMsg> {
@@ -703,7 +670,47 @@ impl<'a> Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt<'a>> {
                 }
             }
             Discovery(_msg) => {
-                let pk = _msg.pub_key.clone();
+                let pub_key = _msg.pub_key.clone();
+
+                let pub_key_dec = base64::decode(&pub_key);
+                if pub_key_dec.is_err() {
+                    return Err(SessionErrorMsg {
+                        code: SessionErrorCodes::InvalidPublicKey as u32,
+                        message: "Invalid public key".to_owned(),
+                    });
+                }
+                let pub_key_dec = pub_key_dec.unwrap();
+                let discovered_cert = read_from_vec(&pub_key_dec);
+                if discovered_cert.is_err() {
+                    return Err(SessionErrorMsg {
+                        code: SessionErrorCodes::InvalidPublicKey as u32,
+                        message: "Invalid public key".to_owned(),
+                    });
+                }
+                let discovered_cert = discovered_cert.unwrap();
+                let discovered_pub_key_fingerprint = discovered_cert.fingerprint().to_string();
+
+                let mut discovered;
+                {
+                    discovered = self.discovered.lock().await;
+                }
+
+                let mut this_fingerprint = None;
+                {
+                    this_fingerprint =
+                        Some(self.host_encro.lock().await.get_public_key_fingerprint());
+                }
+                let this_fingerprint = this_fingerprint.unwrap();
+
+                if discovered_pub_key_fingerprint != this_fingerprint
+                    && !discovered.contains_key(&discovered_pub_key_fingerprint)
+                {
+                    let not_ignore = self.call_callbacks_discovered(&pub_key).await;
+                    if not_ignore {
+                        discovered.insert(discovered_pub_key_fingerprint, pub_key);
+                    }
+                }
+
                 response =
                     Message::new_discovery(self.host_encro.lock().await.get_public_key_as_base64());
                 response.session_id = message.session_id.clone();

@@ -58,7 +58,7 @@ struct Cli {
 
     #[clap(long)]
     #[arg(default_value = "false")]
-    no_discover: bool,
+    no_discovery: bool,
 
     #[clap(long)]
     #[arg(default_value = "false")]
@@ -71,6 +71,7 @@ struct Cli {
 
 // Create a global instance of WindowManager
 static WINDOW_MANAGER: Lazy<WindowManager> = Lazy::new(|| WindowManager::init(2));
+static mut KEEP_RUNNING: Lazy<bool> = Lazy::new(|| true);
 
 fn cb_chat(public_key: &str, message: &str) {
     let pub_key_decoded = match base64::decode(public_key) {
@@ -144,7 +145,11 @@ fn cb_discovered(public_key: &str) -> bool {
 }
 
 fn cb_terminate() {
+    WINDOW_MANAGER.printw(1, "-- Terminating session...");
     WINDOW_MANAGER.cleanup();
+    unsafe {
+        *KEEP_RUNNING = false;
+    }
 }
 
 fn cb_initialized(public_key: &str) -> bool {
@@ -192,7 +197,7 @@ fn terminate(tx: mpsc::Sender<(String, String)>) {
             "terminate".to_owned(),
             topic.to_string(),
         );
-        tx.send((topic.to_string(), msg.to_string())).await;
+        tx.send((topic.to_string(), msg.serialize().unwrap())).await;
     });
 }
 
@@ -206,7 +211,7 @@ async fn main() {
     let test_sender = cli.test_sender;
     let test_receiver = cli.test_receiver;
     let zenoh_config = cli.zenoh_config;
-    let no_discover = cli.no_discover;
+    let no_discovery = cli.no_discovery;
 
     let mut cert = None;
 
@@ -233,9 +238,9 @@ async fn main() {
             read_from_gpg(&gpgkey, Some(passphrase.as_str())).expect("Failed to read gpg key"),
         );
     }
-    let cert = cert.unwrap();
+    let cert = Arc::new(cert.unwrap());
 
-    let pgp_handler = PGPEnDeCrypt::new(&cert, &passphrase);
+    let pgp_handler = PGPEnDeCrypt::new(cert, &passphrase);
     let pub_key_fingerprint = pgp_handler.get_public_key_fingerprint();
     let pub_key_full = pgp_handler.get_public_key_as_base64();
 
@@ -251,31 +256,32 @@ async fn main() {
 
     if test_sender {
         println!("-- Testing initiailize session [sender]");
-        let mut pub_key = None;
+        /*
+                let mut pub_key = None;
+                let discovered_pub_keys = session.discover().await;
+                if discovered_pub_keys.len() > 0 {
+                    pub_key = Some(discovered_pub_keys[0].clone());
+                }
 
-        let discovered_pub_keys = session.discover().await;
-        if discovered_pub_keys.len() > 0 {
-            pub_key = Some(discovered_pub_keys[0].clone());
-        }
+                let pub_key: String = pub_key.expect("Failed to discover nodes out there.. exiting..");
+                let pub_key_dec = base64::decode(&pub_key).expect("Failed to decode pub_key");
+                let discovered_cert =
+                    read_from_vec(&pub_key_dec).expect("Got invalid certificate from discovery");
+                let discovered_pub_key_fingerprint = discovered_cert.fingerprint().to_string();
 
-        let pub_key: String = pub_key.expect("Failed to discover nodes out there.. exiting..");
-        let pub_key_dec = base64::decode(&pub_key).expect("Failed to decode pub_key");
-        let discovered_cert =
-            read_from_vec(&pub_key_dec).expect("Got invalid certificate from discovery");
-        let discovered_pub_key_fingerprint = discovered_cert.fingerprint().to_string();
-
-        println!("Discovered pub_key: {}", &discovered_pub_key_fingerprint);
-        let session_id = match session.initialize_session_zenoh(pub_key.clone()).await {
-            Ok(ok) => {
-                println!("-- Successfully established a session connection");
-                exit(0);
-            }
-            Err(not_ok) => {
-                println!("{}", not_ok);
-                println!("error: Failed to initiailize a session.");
-                exit(1);
-            }
-        };
+                println!("Discovered pub_key: {}", &discovered_pub_key_fingerprint);
+                let session_id = match session.initialize_session_zenoh(pub_key.clone()).await {
+                    Ok(ok) => {
+                        println!("-- Successfully established a session connection");
+                        exit(0);
+                    }
+                    Err(not_ok) => {
+                        println!("{}", not_ok);
+                        println!("error: Failed to initiailize a session.");
+                        exit(1);
+                    }
+                };
+        */
     }
 
     session.register_callback_chat(Box::new(cb_chat)).await;
@@ -294,64 +300,93 @@ async fn main() {
 
     let mut i = 0;
     WINDOW_MANAGER.printw(1, &format!("-- Using key {}", &pub_key_fingerprint));
-    let mut continue_search = !no_discover;
-    let mut peers = Vec::new();
-    while continue_search {
-        WINDOW_MANAGER.printw(1, "-- Discovering peers...");
-        peers = session.discover().await;
-        if peers.len() == 0 {
-            WINDOW_MANAGER.printw(1, &format!("-- Did not discover any peers out there..."));
-            WINDOW_MANAGER.printw(1, &format!("-- Do you want to search again? [y/n]"));
 
-            let input = WINDOW_MANAGER.getch(1, ">> ");
-            if input.to_lowercase().starts_with('y') {
-                continue_search = true;
-            } else {
-                continue_search = false;
+    let tx = session.get_tx().await;
+    ctrlc_async::set_handler(move || {
+        println!("CTRL C");
+        let tx_clone = tx.clone();
+        terminate(tx_clone);
+    })
+    .expect("Error setting Ctrl-C handler");
 
-                WINDOW_MANAGER.printw(1, &format!("-- Awaiting peers to connect to us..."));
+    if !no_discovery {
+        WINDOW_MANAGER.printw(1, "-- Discovering other peers out there...");
+        session.discover().await;
+
+        let mut session_discover = session.clone();
+        session_discover.set_tx_chat(session.get_tx().await);
+        tokio::spawn(async move {
+            let mut session = session_discover;
+            let mut continue_search = true;
+            let mut keep_running = true;
+            unsafe {
+                keep_running = *KEEP_RUNNING;
             }
-        } else {
-            continue_search = false;
-        }
-    }
+            let mut peers = Vec::new();
+            while continue_search && keep_running {
+                session.discover().await;
 
-    if peers.len() > 0 {
-        WINDOW_MANAGER.printw(1, &format!("-- Discovered {} peers", peers.len()));
-        let mut i = 1;
-        for peer in &peers {
-            let peer_decoded = base64::decode(&peer).unwrap();
-            let peer_cert = read_from_vec(&peer_decoded).unwrap();
-            let peer_fingerprint = peer_cert.fingerprint();
-            let mut peer_userid = "".to_string();
-            for uid in peer_cert.userids() {
-                peer_userid.push_str(&uid.userid().to_string());
-            }
+                WINDOW_MANAGER.printw(1, "-- Awaiting responses...");
+                // sleep for some time
+                tokio::time::sleep(Duration::from_secs(5)).await;
 
-            WINDOW_MANAGER.printw(
-                1,
-                &format!("-- {}: {} {}", i, peer_userid, peer_fingerprint),
-            );
-            i += 1;
-        }
+                peers = session.get_discovered().await;
+                if peers.len() == 0 {
+                    WINDOW_MANAGER.printw(
+                        1,
+                        "-- Did not discover any other peers out there ¯\\_(´_´)_/¯...",
+                    );
+                    WINDOW_MANAGER.printw(1, &format!("-- Do you want to search again? [y/n]"));
 
-        let mut keep_going = true;
-        while keep_going {
-            WINDOW_MANAGER.printw(
-                1,
-                &format!(
-                    "Which peer do you want to connect to [{}]?",
-                    if peers.len() == 1 {
-                        format!("1")
+                    let input = WINDOW_MANAGER.getch(1, ">> ");
+                    if input.to_lowercase().starts_with('y') {
+                        continue_search = true;
                     } else {
-                        format!("1-{}", peers.len())
+                        continue_search = false;
                     }
-                ),
-            );
-            let p = WINDOW_MANAGER.getch(1, ">> ");
-            match p.parse::<usize>() {
-                Ok(p) => {
-                    if p > 0 && p <= peers.len() {
+                } else {
+                    continue_search = false;
+                }
+            }
+            if peers.len() > 0 {
+                WINDOW_MANAGER.printw(1, &format!("-- Discovered {} peers", peers.len()));
+                let mut i = 1;
+                for peer in &peers {
+                    let peer_decoded = base64::decode(&peer).unwrap();
+                    let peer_cert = read_from_vec(&peer_decoded).unwrap();
+                    let peer_fingerprint = peer_cert.fingerprint();
+                    let mut peer_userid = "".to_string();
+                    for uid in peer_cert.userids() {
+                        peer_userid.push_str(&uid.userid().to_string());
+                    }
+
+                    WINDOW_MANAGER.printw(
+                        1,
+                        &format!("-- {}: {} {}", i, peer_userid, peer_fingerprint),
+                    );
+                    i += 1;
+                }
+
+                let mut keep_going = true;
+                let mut keep_running = true;
+                while keep_running && keep_going {
+                    unsafe {
+                        keep_running = *KEEP_RUNNING;
+                    }
+                    WINDOW_MANAGER.printw(
+                        1,
+                        &format!(
+                            "Which peer do you want to connect to [{}]?",
+                            if peers.len() == 1 {
+                                format!("1")
+                            } else {
+                                format!("1-{}", peers.len())
+                            }
+                        ),
+                    );
+                    let p = WINDOW_MANAGER.getch(1, ">> ");
+                    if p.to_lowercase().starts_with('y') {
+                        let p = 1;
                         let peer = peers[p - 1].clone();
                         let peer_decoded = base64::decode(&peer).unwrap();
                         let peer_cert = read_from_vec(&peer_decoded).unwrap();
@@ -369,27 +404,42 @@ async fn main() {
                         );
                         let session_id = session.initialize_session_zenoh(peer).await.unwrap();
                         keep_going = false;
-                    } else {
-                        WINDOW_MANAGER.printw(1, "-- Invalid input");
-                        keep_going = true;
+                    }
+                    match p.parse::<usize>() {
+                        Ok(p) => {
+                            if p > 0 && p <= peers.len() {
+                                let peer = peers[p - 1].clone();
+                                let peer_decoded = base64::decode(&peer).unwrap();
+                                let peer_cert = read_from_vec(&peer_decoded).unwrap();
+                                let peer_fingerprint = peer_cert.fingerprint();
+                                let mut peer_userid = "".to_string();
+                                for uid in peer_cert.userids() {
+                                    peer_userid.push_str(&uid.userid().to_string());
+                                }
+                                WINDOW_MANAGER.printw(
+                                    1,
+                                    &format!(
+                                        "-- Sending a session initialization request to {} {} ...",
+                                        peer_userid, peer_fingerprint
+                                    ),
+                                );
+                                let session_id =
+                                    session.initialize_session_zenoh(peer).await.unwrap();
+                                keep_going = false;
+                            } else {
+                                WINDOW_MANAGER.printw(1, "-- Invalid input");
+                                keep_going = true;
+                            }
+                        }
+                        Err(_) => {
+                            WINDOW_MANAGER.printw(1, "-- Invalid input");
+                            keep_going = true;
+                        }
                     }
                 }
-                Err(_) => {
-                    WINDOW_MANAGER.printw(1, "-- Invalid input");
-                    keep_going = true;
-                }
             }
-        }
-    } else {
-        WINDOW_MANAGER.printw(1, &format!("-- Awaiting connection requests from peers..."));
+        });
     }
-
-    let tx = session.get_tx().await;
-    ctrlc_async::set_handler(move || {
-        let tx_clone = tx.clone();
-        terminate(tx_clone);
-    })
-    .expect("Error setting Ctrl-C handler");
-
+    WINDOW_MANAGER.printw(1, &format!("-- Awaiting other peers to connect to us..."));
     session.serve().await;
 }

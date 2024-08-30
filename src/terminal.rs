@@ -34,9 +34,8 @@ impl WindowManager {
         for i in 0..num_windows {
             let start_y = i as i32 * win_height;
             let win = newwin(win_height, win_width, start_y, 0);
-            let subwin = derwin(win, win_height - 2, win_width - 2, 1, 1);
+            let subwin = derwin(win, win_height - 1, win_width - 1, 1, 1);
             scrollok(subwin, true); // Enable scrolling for the window
-            box_(win, 0, 0); // Draw a box around the window
             wrefresh(win); // Refresh the window to apply the box
             windows.insert(i, (win, subwin));
         }
@@ -51,8 +50,18 @@ impl WindowManager {
     // Print a message to a specific window
     pub fn printw(&self, window_number: usize, message: &str) {
         if let Some((win, subwin)) = self.windows.get(&window_number) {
+            // Move the cursor to the next line in the subwindow
+            let cur_y = getcury(*subwin);
+            if cur_y + 1 >= getmaxy(*subwin) {
+                // Manually scroll the subwindow if the cursor is at the bottom
+                wscrl(*subwin, 1);
+                wmove(*subwin, getmaxy(*subwin) - 1, 1); // Move cursor to the start of the new line after scroll
+            } else {
+                wmove(*subwin, cur_y + 1, 1);
+            }
+
             // Print the message in the window
-            mvwprintw(*subwin, getcury(*subwin) + 1, 1, message);
+            wprintw(*subwin, message);
             wrefresh(*subwin); // Refresh the window to display the new content
         } else {
             println!("Window number {} does not exist.", window_number);
@@ -63,7 +72,6 @@ impl WindowManager {
     pub fn getch(&self, window_number: usize, prompt: &str) -> String {
         if let Some((win, subwin)) = self.windows.get(&window_number) {
             loop {
-                box_(*win, 0, 0);
                 wrefresh(*subwin);
 
                 // Move the cursor to just inside the box, 1 line down, 1 column in
@@ -93,7 +101,11 @@ impl WindowManager {
                 }
 
                 // Exit condition (optional)
-                return std::str::from_utf8(input.as_slice()).unwrap().to_string();
+                return std::str::from_utf8(input.as_slice())
+                    .unwrap()
+                    .to_string()
+                    .trim()
+                    .to_string();
             }
         } else {
             println!("Window number {} does not exist.", window_number);

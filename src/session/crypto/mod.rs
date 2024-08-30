@@ -7,7 +7,9 @@ use chacha20poly1305::{
 use openpgp::cert::prelude::*;
 use openpgp::policy::StandardPolicy as P;
 use openpgp::Cert;
+
 use sha2::{Digest, Sha256};
+use std::sync::Arc;
 
 use crate::pgp::*;
 
@@ -109,21 +111,20 @@ impl CrypticalDecrypt for ChaCha20Poly1305EnDeCrypt {
     }
 }
 
-// Define the PGPEnDeCrypt struct with a lifetime parameter
-pub struct PGPEnDeCrypt<'a> {
-    cert: &'a Cert,
+pub struct PGPEnDeCrypt {
+    cert: Arc<Cert>,
     cert_passphrase: String,
 }
 
-impl<'a> PGPEnDeCrypt<'a> {
-    pub fn new(cert: &'a Cert, cert_passphrase: &str) -> Self {
+impl PGPEnDeCrypt {
+    pub fn new(cert: Arc<Cert>, cert_passphrase: &str) -> Self {
         let cert_passphrase = String::from(cert_passphrase);
         PGPEnDeCrypt {
             cert,
             cert_passphrase,
         }
     }
-    pub fn new_no_certpass(cert: &'a Cert) -> Self {
+    pub fn new_no_certpass(cert: Arc<Cert>) -> Self {
         let cert_passphrase = String::from("");
         PGPEnDeCrypt {
             cert,
@@ -133,15 +134,15 @@ impl<'a> PGPEnDeCrypt<'a> {
 }
 
 // Implement the Cryptical trait for PGPEnDeCrypt
-impl<'a> Cryptical for PGPEnDeCrypt<'a> {
+impl Cryptical for PGPEnDeCrypt {
     fn get_public_key_as_base64(&self) -> String {
-        pgp::get_public_key_as_base64(&self.cert)
+        pgp::get_public_key_as_base64(self.cert.clone())
     }
     fn get_public_key_fingerprint(&self) -> String {
         self.cert.fingerprint().to_string()
     }
 }
-impl<'a> CrypticalID for PGPEnDeCrypt<'a> {
+impl CrypticalID for PGPEnDeCrypt {
     fn get_userid(&self) -> String {
         let mut userid = "".to_string();
         for uid in self.cert.userids() {
@@ -151,18 +152,18 @@ impl<'a> CrypticalID for PGPEnDeCrypt<'a> {
     }
 }
 
-impl<'a> CrypticalEncrypt for PGPEnDeCrypt<'a> {
+impl CrypticalEncrypt for PGPEnDeCrypt {
     fn encrypt(&self, input: &str) -> Result<String, String> {
         // Implement your encryption logic here
         let mut sink = Vec::new();
         let p = &P::new();
-        match pgp::encrypt(p, &mut sink, input, &self.cert) {
+        match pgp::encrypt(p, &mut sink, input, self.cert.clone()) {
             Ok(_) => Ok(base64::encode(sink)),
             Err(_msg) => Err(String::from("Failed to encrypt")),
         }
     }
 }
-impl<'a> CrypticalDecrypt for PGPEnDeCrypt<'a> {
+impl CrypticalDecrypt for PGPEnDeCrypt {
     fn decrypt(&self, input: &str) -> Result<String, String> {
         // Implement your decryption logic here
         let mut sink = Vec::new();
@@ -175,7 +176,7 @@ impl<'a> CrypticalDecrypt for PGPEnDeCrypt<'a> {
             p,
             &mut sink,
             &input_base64decoded,
-            &self.cert,
+            self.cert.clone(),
             &self.cert_passphrase,
         ) {
             Ok(_) => Ok(String::from_utf8(sink).unwrap()),
@@ -185,22 +186,28 @@ impl<'a> CrypticalDecrypt for PGPEnDeCrypt<'a> {
 }
 
 pub struct PGPEnCryptOwned {
-    cert: Cert,
+    cert: Arc<Cert>,
 }
 
 impl PGPEnCryptOwned {
     pub fn new(cert: Cert) -> Self {
-        PGPEnCryptOwned { cert }
+        PGPEnCryptOwned {
+            cert: Arc::new(cert),
+        }
     }
     pub fn new_from_str(cert_str: &str) -> Result<Self, String> {
         match pgp::read_from_str(cert_str) {
-            Ok(cert) => Ok(PGPEnCryptOwned { cert }),
+            Ok(cert) => Ok(PGPEnCryptOwned {
+                cert: Arc::new(cert),
+            }),
             Err(msg) => Err(msg),
         }
     }
     pub fn new_from_vec(cert_vec: &Vec<u8>) -> Result<Self, String> {
         match pgp::read_from_vec(cert_vec) {
-            Ok(cert) => Ok(PGPEnCryptOwned { cert }),
+            Ok(cert) => Ok(PGPEnCryptOwned {
+                cert: Arc::new(cert),
+            }),
             Err(msg) => Err(msg),
         }
     }
@@ -221,7 +228,7 @@ impl CrypticalEncrypt for PGPEnCryptOwned {
         // Implement your encryption logic here
         let mut sink = Vec::new();
         let p = &P::new();
-        match pgp::encrypt(p, &mut sink, input, &self.cert) {
+        match pgp::encrypt(p, &mut sink, input, self.cert.clone()) {
             Ok(_) => Ok(base64::encode(sink)),
             Err(_msg) => Err(String::from("Failed to encrypt")),
         }
@@ -231,7 +238,7 @@ impl CrypticalEncrypt for PGPEnCryptOwned {
 // Implement the Cryptical trait for PGPEnDeCrypt
 impl Cryptical for PGPEnCryptOwned {
     fn get_public_key_as_base64(&self) -> String {
-        pgp::get_public_key_as_base64(&self.cert)
+        pgp::get_public_key_as_base64(self.cert.clone())
     }
     fn get_public_key_fingerprint(&self) -> String {
         self.cert.fingerprint().to_string()
