@@ -22,6 +22,8 @@ use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
 use tokio::time::timeout;
 
+use serde::{Deserialize, Serialize};
+
 use std::env;
 use std::io::{self, Write};
 
@@ -36,7 +38,9 @@ use clap::Parser;
 use ncurses::*;
 
 mod terminal;
-use terminal::WindowManager;
+use terminal::{
+    NewWindowCommand, PrintCommand, ReadCommand, WindowCommand, WindowManager, WindowPipe,
+};
 
 use session::middleware::{ZMQHandler, ZenohHandler};
 
@@ -70,8 +74,16 @@ struct Cli {
 }
 
 // Create a global instance of WindowManager
-static WINDOW_MANAGER: Lazy<WindowManager> = Lazy::new(|| WindowManager::init(2));
 static mut KEEP_RUNNING: Lazy<bool> = Lazy::new(|| true);
+static mut WINDOW_PIPE: Lazy<WindowPipe> = Lazy::new(|| WindowPipe::new());
+
+async fn print_message(window: usize, message: String) {
+    unsafe {
+        WINDOW_PIPE
+            .send(WindowCommand::Print(PrintCommand { window, message }))
+            .await;
+    }
+}
 
 fn cb_chat(public_key: &str, message: &str) {
     let pub_key_decoded = match base64::decode(public_key) {
@@ -82,7 +94,7 @@ fn cb_chat(public_key: &str, message: &str) {
     };
     match PGPEnCryptOwned::new_from_vec(&pub_key_decoded) {
         Ok(pub_encro) => {
-            WINDOW_MANAGER.printw(
+            /*WINDOW_MANAGER.printw(
                 0,
                 &format!(
                     "{} ({}): {}",
@@ -90,7 +102,7 @@ fn cb_chat(public_key: &str, message: &str) {
                     pub_encro.get_userid(),
                     message
                 ),
-            );
+            );*/
         }
         _ => {}
     }
@@ -102,8 +114,8 @@ fn cb_chat_input(
     topic_out: &str,
 ) -> (String, String) {
     let prompt = ">> ".to_string();
-    let input = WINDOW_MANAGER.getch(1, &prompt);
-    let input = input.trim();
+    //let input = WINDOW_MANAGER.getch(1, &prompt);
+    let input = "".to_string(); // input.trim();
     let topic = Topic::Internal.as_str();
     let mut msg = SessionMessage::new_internal(
         session_id.to_string(),
@@ -130,14 +142,14 @@ fn cb_discovered(public_key: &str) -> bool {
     };
     match PGPEnCryptOwned::new_from_vec(&pub_key_decoded) {
         Ok(pub_encro) => {
-            WINDOW_MANAGER.printw(
+            /*  WINDOW_MANAGER.printw(
                 1,
                 &format!(
                     "-- Discovered public key {} from {}",
                     pub_encro.get_public_key_fingerprint(),
                     pub_encro.get_userid()
                 ),
-            );
+            );*/
             true
         }
         _ => false,
@@ -145,8 +157,8 @@ fn cb_discovered(public_key: &str) -> bool {
 }
 
 fn cb_terminate() {
-    WINDOW_MANAGER.printw(1, "-- Terminating session...");
-    WINDOW_MANAGER.cleanup();
+    //WINDOW_MANAGER.printw(1, "-- Terminating session...");
+    //WINDOW_MANAGER.cleanup();
     unsafe {
         *KEEP_RUNNING = false;
     }
@@ -161,7 +173,7 @@ fn cb_initialized(public_key: &str) -> bool {
     };
     match PGPEnCryptOwned::new_from_vec(&pub_key_decoded) {
         Ok(pub_encro) => {
-            WINDOW_MANAGER.printw(
+            /*WINDOW_MANAGER.printw(
                 1,
                 &format!(
                     "-- Initialization attempt with {} {}",
@@ -179,7 +191,7 @@ fn cb_initialized(public_key: &str) -> bool {
                 return true;
             } else {
                 WINDOW_MANAGER.printw(1, "-- chat not accepted");
-            }
+            }*/
             false
         }
         _ => {
@@ -190,6 +202,7 @@ fn cb_initialized(public_key: &str) -> bool {
 }
 
 fn terminate(tx: mpsc::Sender<(String, String)>) {
+    println!("TERMINATE");
     tokio::spawn(async move {
         let topic = Topic::Internal.as_str();
         let msg = SessionMessage::new_internal(
@@ -198,6 +211,58 @@ fn terminate(tx: mpsc::Sender<(String, String)>) {
             topic.to_string(),
         );
         tx.send((topic.to_string(), msg.serialize().unwrap())).await;
+    });
+    let pipe;
+    unsafe {
+        pipe = WINDOW_PIPE.clone();
+    }
+
+    tokio::spawn(async move {
+        println!("will shutdowm");
+        pipe.send(WindowCommand::Shutdown()).await;
+        println!("SHUTDOWN");
+    });
+}
+
+async fn launch_terminal_program() {
+    tokio::spawn(async move {
+        let pipe;
+        unsafe {
+            pipe = WINDOW_PIPE.clone();
+        }
+        let mut window_manager = WindowManager::new();
+
+        let (tx, rx) = mpsc::channel::<String>(50);
+
+        let pipe_clone = pipe.clone();
+        let tx_clone = tx.clone();
+        tokio::spawn(async move {
+            // Initialize
+            let pipe = pipe_clone;
+            pipe.send(WindowCommand::Init()).await;
+
+            tokio::time::sleep(Duration::from_millis(100)).await;
+
+            let (max_y, max_x) = WindowManager::get_max_yx();
+            let num_windows = 2;
+            let win_height = max_y / num_windows as i32;
+            let win_width = max_x;
+
+            // Create the windows
+            for i in 0..num_windows {
+                let start_y = i * win_height;
+                let window_cmd = NewWindowCommand {
+                    start_y,
+                    win_height,
+                    win_width,
+                };
+                pipe.send(WindowCommand::New(window_cmd)).await;
+            }
+            println!("OK!");
+        });
+        let tx_clone = tx_clone.clone();
+        let pipe_clone = pipe.clone();
+        window_manager.serve(pipe_clone).await
     });
 }
 
@@ -299,16 +364,23 @@ async fn main() {
         .await;
 
     let mut i = 0;
-    WINDOW_MANAGER.printw(1, &format!("-- Using key {}", &pub_key_fingerprint));
 
     let tx = session.get_tx().await;
     ctrlc_async::set_handler(move || {
         println!("CTRL C");
-        let tx_clone = tx.clone();
-        terminate(tx_clone);
+
+        io::stdout().flush().unwrap();
+        //let tx_clone = tx.clone();
+        //terminate(tx_clone);
     })
     .expect("Error setting Ctrl-C handler");
 
+   // launch_terminal_program().await;
+
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    print_message(1, format!("-- Using key {}", &pub_key_fingerprint)).await;
+    /*
     if !no_discovery {
         WINDOW_MANAGER.printw(1, "-- Discovering other peers out there...");
         session.discover().await;
@@ -440,6 +512,7 @@ async fn main() {
             }
         });
     }
-    WINDOW_MANAGER.printw(1, &format!("-- Awaiting other peers to connect to us..."));
+    WINDOW_MANAGER.printw(1, &format!("-- Awaiting other peers to connect to us..."));*/
+    println!("serving..");
     session.serve().await;
 }
