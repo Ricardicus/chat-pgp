@@ -422,8 +422,9 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
         let zenoh_session_responder =
             Arc::new(Mutex::new(zenoh::open(zenoh_config).res().await.unwrap()));
         let responder = ZenohHandler::new(zenoh_session_responder);
-
-        while let Some(received) = self.rx.recv().await {
+        let mut keep_running = true;
+        while keep_running {
+            let mut received = self.rx.recv().await.expect("Error in session");
             let topic = received.0;
             let mut topic_response = topic.clone();
             topic_response.push_str(Topic::reply_suffix());
@@ -436,6 +437,10 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                             // Do something
                             let response = res.0;
                             let topic_response = res.1;
+                            if topic_response == "terminate" {
+                                keep_running = false;
+                                continue;
+                            }
                             let m = response.clone();
                             responder
                                 .send_message(&topic_response, response.clone())
@@ -640,7 +645,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                 if topic == Topic::Internal.as_str() {
                     if message.session_id == "internal" && msg.message == "terminate" {
                         self.call_callbacks_terminate().await;
-                        exit(0);
+                        return Ok((response, msg.message));
                     }
 
                     let session_id = message.session_id.clone();

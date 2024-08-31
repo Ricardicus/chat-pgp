@@ -5,6 +5,8 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 
+use std::time::Duration;
+
 use serde::{Deserialize, Serialize};
 
 pub struct WindowManager {
@@ -237,34 +239,34 @@ impl WindowManager {
     pub async fn serve(&mut self, pipe: WindowPipe) {
         let mut keep_running = true;
         while keep_running {
-            println!("About to read");
             match pipe.read().await {
-                Ok(command) => {
-                    println!("got a command: {:?}", command);
-                    match command {
-                        WindowCommand::Read(cmd) => {
-                            let input = self.getch(cmd.window, &cmd.prompt);
-                            let _ = pipe.tx_input.lock().await.send(input).await;
-                        }
-                        WindowCommand::Print(cmd) => {
-                            self.printw(cmd.window, &cmd.message);
-                        }
-                        WindowCommand::New(cmd) => {
-                            self.new_window(cmd.win_height, cmd.win_width, cmd.start_y);
-                        }
-                        Init => {
-                            self.init();
-                            println!("init");
-                        }
-                        Shutdown => {
-                            println!("shutdown");
-                            keep_running = false;
-                        }
+                Ok(command) => match command {
+                    WindowCommand::Read(cmd) => {
+                        let input = self.getch(cmd.window, &cmd.prompt);
+                        let _ = pipe.tx_input.lock().await.send(input).await;
                     }
+                    WindowCommand::Print(cmd) => {
+                        self.printw(cmd.window, &cmd.message);
+                    }
+                    WindowCommand::New(cmd) => {
+                        self.new_window(cmd.win_height, cmd.win_width, cmd.start_y);
+                    }
+                    WindowCommand::Init() => {
+                        self.init();
+                    }
+                    WindowCommand::Shutdown() => {
+                        keep_running = false;
+                    }
+                    _ => {
+                        println!("No match");
+                    }
+                },
+                Err(()) => {
+                    println!("Error incoming..");
                 }
-                Err(()) => {}
             }
         }
+        self.cleanup();
     }
 }
 

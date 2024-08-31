@@ -19,6 +19,7 @@ use zenoh::Config;
 
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::signal;
 use tokio::sync::{mpsc, Mutex};
 use tokio::time::timeout;
 
@@ -74,7 +75,6 @@ struct Cli {
 }
 
 // Create a global instance of WindowManager
-static mut KEEP_RUNNING: Lazy<bool> = Lazy::new(|| true);
 static mut WINDOW_PIPE: Lazy<WindowPipe> = Lazy::new(|| WindowPipe::new());
 
 async fn print_message(window: usize, message: String) {
@@ -159,9 +159,6 @@ fn cb_discovered(public_key: &str) -> bool {
 fn cb_terminate() {
     //WINDOW_MANAGER.printw(1, "-- Terminating session...");
     //WINDOW_MANAGER.cleanup();
-    unsafe {
-        *KEEP_RUNNING = false;
-    }
 }
 
 fn cb_initialized(public_key: &str) -> bool {
@@ -201,27 +198,20 @@ fn cb_initialized(public_key: &str) -> bool {
     }
 }
 
-fn terminate(tx: mpsc::Sender<(String, String)>) {
-    println!("TERMINATE");
-    tokio::spawn(async move {
-        let topic = Topic::Internal.as_str();
-        let msg = SessionMessage::new_internal(
-            "internal".to_owned(),
-            "terminate".to_owned(),
-            topic.to_string(),
-        );
-        tx.send((topic.to_string(), msg.serialize().unwrap())).await;
-    });
+async fn terminate(tx: mpsc::Sender<(String, String)>) {
     let pipe;
     unsafe {
         pipe = WINDOW_PIPE.clone();
     }
-
-    tokio::spawn(async move {
-        println!("will shutdowm");
-        pipe.send(WindowCommand::Shutdown()).await;
-        println!("SHUTDOWN");
-    });
+    let topic = Topic::Internal.as_str();
+    let msg = SessionMessage::new_internal(
+        "internal".to_owned(),
+        "terminate".to_owned(),
+        topic.to_string(),
+    );
+    pipe.send(WindowCommand::Shutdown()).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    tx.send((topic.to_string(), msg.serialize().unwrap())).await;
 }
 
 async fn launch_terminal_program() {
@@ -258,11 +248,10 @@ async fn launch_terminal_program() {
                 };
                 pipe.send(WindowCommand::New(window_cmd)).await;
             }
-            println!("OK!");
         });
         let tx_clone = tx_clone.clone();
         let pipe_clone = pipe.clone();
-        window_manager.serve(pipe_clone).await
+        window_manager.serve(pipe_clone).await;
     });
 }
 
@@ -366,16 +355,14 @@ async fn main() {
     let mut i = 0;
 
     let tx = session.get_tx().await;
-    ctrlc_async::set_handler(move || {
-        println!("CTRL C");
+    tokio::spawn(async move {
+        let c = tokio::signal::ctrl_c().await;
+        if c.is_ok() {
+            terminate(tx).await;
+        }
+    });
 
-        io::stdout().flush().unwrap();
-        //let tx_clone = tx.clone();
-        //terminate(tx_clone);
-    })
-    .expect("Error setting Ctrl-C handler");
-
-   // launch_terminal_program().await;
+    launch_terminal_program().await;
 
     tokio::time::sleep(Duration::from_secs(1)).await;
 
@@ -513,6 +500,5 @@ async fn main() {
         });
     }
     WINDOW_MANAGER.printw(1, &format!("-- Awaiting other peers to connect to us..."));*/
-    println!("serving..");
     session.serve().await;
 }
