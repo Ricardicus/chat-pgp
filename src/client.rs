@@ -27,6 +27,9 @@ use serde::{Deserialize, Serialize};
 
 use std::env;
 use std::io::{self, Write};
+use std::pin::Pin;
+
+use std::future::Future;
 
 use once_cell::sync::Lazy;
 
@@ -78,10 +81,14 @@ struct Cli {
 static mut WINDOW_PIPE: Lazy<WindowPipe> = Lazy::new(|| WindowPipe::new());
 
 async fn print_message(window: usize, message: String) {
+    println!("print message 1 ");
     unsafe {
+        println!("window pipe send 1");
         WINDOW_PIPE
             .send(WindowCommand::Print(PrintCommand { window, message }))
             .await;
+
+        println!("widnwo pipe returned"); 
     }
 }
 
@@ -94,6 +101,16 @@ fn cb_chat(public_key: &str, message: &str) {
     };
     match PGPEnCryptOwned::new_from_vec(&pub_key_decoded) {
         Ok(pub_encro) => {
+            print_message(
+                0,
+                format!(
+                    "{} ({}): {}",
+                    pub_encro.get_public_key_fingerprint(),
+                    pub_encro.get_userid(),
+                    message
+                ),
+            );
+
             /*WINDOW_MANAGER.printw(
                 0,
                 &format!(
@@ -133,7 +150,7 @@ fn cb_chat_input(
     return (topic.to_string(), msg.serialize().unwrap());
 }
 
-fn cb_discovered(public_key: &str) -> bool {
+async fn cb_discovered(public_key: String) -> bool {
     let pub_key_decoded = match base64::decode(public_key) {
         Err(_) => {
             return false;
@@ -142,6 +159,16 @@ fn cb_discovered(public_key: &str) -> bool {
     };
     match PGPEnCryptOwned::new_from_vec(&pub_key_decoded) {
         Ok(pub_encro) => {
+            println!("discovered..");
+            print_message(
+                1,
+                format!(
+                    "-- Discovered public key {} from {}",
+                    pub_encro.get_public_key_fingerprint(),
+                    pub_encro.get_userid()
+                )
+            ).await;
+            println!("sent I think");
             /*  WINDOW_MANAGER.printw(
                 1,
                 &format!(
@@ -157,8 +184,7 @@ fn cb_discovered(public_key: &str) -> bool {
 }
 
 fn cb_terminate() {
-    //WINDOW_MANAGER.printw(1, "-- Terminating session...");
-    //WINDOW_MANAGER.cleanup();
+    print_message(1, format!("-- Terminating session ..."));
 }
 
 fn cb_initialized(public_key: &str) -> bool {
@@ -170,18 +196,20 @@ fn cb_initialized(public_key: &str) -> bool {
     };
     match PGPEnCryptOwned::new_from_vec(&pub_key_decoded) {
         Ok(pub_encro) => {
-            /*WINDOW_MANAGER.printw(
+            print_message(
                 1,
-                &format!(
+                format!(
                     "-- Initialization attempt with {} {}",
                     pub_encro.get_public_key_fingerprint(),
                     pub_encro.get_userid()
                 ),
             );
-            WINDOW_MANAGER.printw(
+            print_message(
                 1,
-                "The peer wants to chat, do you want to chat with this peer? [y/n]",
+                format!("The peer wants to chat, do you want to chat with this peer? [y/n]"),
             );
+
+            /*
             let input = WINDOW_MANAGER.getch(1, ">> ");
             if input.to_lowercase().starts_with('y') {
                 WINDOW_MANAGER.printw(1, "-- Chat initialized, exit by typing '!exit'");
@@ -296,6 +324,7 @@ async fn main() {
 
     let pgp_handler = PGPEnDeCrypt::new(cert, &passphrase);
     let pub_key_fingerprint = pgp_handler.get_public_key_fingerprint();
+    let pub_key_userid = pgp_handler.get_userid();
     let pub_key_full = pgp_handler.get_public_key_as_base64();
 
     let mut session = Session::new(pgp_handler, zenoh_config.clone());
@@ -338,12 +367,19 @@ async fn main() {
         */
     }
 
+    // Wrap the async function `cb_discovered` into a closure that matches the expected signature
+    let async_callback = move |input: String| {
+        Box::pin(cb_discovered(input)) as Pin<Box<dyn Future<Output = bool> + Send>>
+    };
+
+    // Register the async callback
+
     session.register_callback_chat(Box::new(cb_chat)).await;
     session
         .register_callback_initialized(Box::new(cb_initialized))
         .await;
     session
-        .register_callback_discovered(Box::new(cb_discovered))
+        .register_callback_discovered(Box::new(async_callback))
         .await;
     session
         .register_callback_chat_input(Box::new(cb_chat_input))
@@ -366,7 +402,7 @@ async fn main() {
 
     tokio::time::sleep(Duration::from_secs(1)).await;
 
-    print_message(1, format!("-- Using key {}", &pub_key_fingerprint)).await;
+    print_message(1, format!("-- Using key {} {}", &pub_key_fingerprint, &pub_key_userid)).await;
     /*
     if !no_discovery {
         WINDOW_MANAGER.printw(1, "-- Discovering other peers out there...");
@@ -500,5 +536,7 @@ async fn main() {
         });
     }
     WINDOW_MANAGER.printw(1, &format!("-- Awaiting other peers to connect to us..."));*/
+    session.discover().await;
+    print_message(1, format!("-- Awaiting other peers to connect to us..."));
     session.serve().await;
 }

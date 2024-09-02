@@ -9,6 +9,7 @@ use tokio::time::timeout;
 
 use std::env;
 use std::io::{self, Write};
+use std::pin::Pin;
 
 pub mod crypto;
 pub mod messages;
@@ -76,7 +77,8 @@ where
     pub tx_chat: mpsc::Sender<(String, String)>,
     pub rx: mpsc::Receiver<(String, String)>,
     pub callbacks_chat: Arc<Mutex<Vec<Box<dyn Fn(&str, &str) + Send>>>>,
-    pub callbacks_discovered: Arc<Mutex<Vec<Box<dyn Fn(&str) -> bool + Send>>>>,
+
+    pub callbacks_discovered: Arc<Mutex<Vec<Box<dyn Fn(String) -> Pin<Box<dyn Future<Output = bool> + Send>> + Send + Sync>>>>,
     pub callbacks_initialized: Arc<Mutex<Vec<Box<dyn Fn(&str) -> bool + Send>>>>,
     pub callbacks_terminate: Arc<Mutex<Vec<Box<dyn Fn() + Send>>>>,
     pub callbacks_chat_input:
@@ -195,10 +197,11 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
         let mut callbacks = self.callbacks_chat.lock().await;
         callbacks.push(callback);
     }
-    pub async fn register_callback_discovered(&self, callback: Box<dyn Fn(&str) -> bool + Send>) {
-        let mut callbacks = self.callbacks_discovered.lock().await;
-        callbacks.push(callback);
-    }
+pub async fn register_callback_discovered(&self, callback: Box<dyn Fn(String) -> Pin<Box<dyn Future<Output = bool> + Send>> + Send + Sync>) {
+    let mut callbacks = self.callbacks_discovered.lock().await;
+    callbacks.push(callback);
+}
+
     pub async fn register_callback_initialized(&self, callback: Box<dyn Fn(&str) -> bool + Send>) {
         let mut callbacks = self.callbacks_initialized.lock().await;
         callbacks.push(callback);
@@ -239,7 +242,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
     async fn call_callbacks_discovered(&self, arg1: &str) -> bool {
         let callbacks = self.callbacks_discovered.lock().await;
         for callback in callbacks.iter() {
-            if !callback(arg1) {
+            if !callback(arg1.to_string()).await {
                 return false;
             }
         }
