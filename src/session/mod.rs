@@ -23,12 +23,14 @@ use crypto::{
     PGPEnCryptOwned, PGPEnDeCrypt,
 };
 
-use messages::MessageData::{Chat, Close, Discovery, Encrypted, Init, InitOk, Internal, Ping};
+use messages::MessageData::{
+    Chat, Close, Discovery, Encrypted, Init, InitAwait, InitOk, Internal, Ping,
+};
 use messages::MessagingError::*;
 use messages::SessionMessage as Message;
 use messages::{
-    ChatMsg, EncryptedMsg, InitMsg, InitOkMsg, InternalMsg, MessageData, MessageListener,
-    Messageble, MessagebleTopicAsync, MessagebleTopicAsyncPublishReads,
+    ChatMsg, EncryptedMsg, InitAwaitMsg, InitMsg, InitOkMsg, InternalMsg, MessageData,
+    MessageListener, Messageble, MessagebleTopicAsync, MessagebleTopicAsyncPublishReads,
     MessagebleTopicAsyncReadTimeout, MessagingError, SessionErrorCodes, SessionErrorMsg,
 };
 use middleware::ZenohHandler;
@@ -72,7 +74,8 @@ where
 {
     pub sessions: Arc<Mutex<HashMap<String, SessionData<SessionCrypto>>>>,
     pub discovered: Arc<Mutex<HashMap<String, String>>>,
-    pub requests_initialization: Arc<Mutex<Vec<(String, SessionData<SessionCrypto>)>>>,
+    pub requests_initialization:
+        Arc<Mutex<Vec<(String, SessionData<SessionCrypto>, Option<Message>)>>>,
     pub host_encro: Arc<Mutex<HostCrypto>>,
     pub tx: mpsc::Sender<(String, String)>,
     pub tx_chat: mpsc::Sender<(String, String)>,
@@ -177,7 +180,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
             let mut requests = self.requests_initialization.lock().await;
             let mut index = None;
 
-            for (i, (id, sd)) in requests.iter().enumerate() {
+            for (i, (id, sd, _)) in requests.iter().enumerate() {
                 if id == session_id {
                     index = Some(i);
                     session_data = Some(sd.clone());
@@ -410,8 +413,8 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                                 pub_key: pub_key.clone(),
                             };
                             {
-                                let mut hm = self.sessions.lock().await;
-                                hm.insert(key.clone(), session_data);
+                                let mut hm = self.requests_initialization.lock().await;
+                                hm.push((key.clone(), session_data, None));
                             }
                             self.chat(key.clone(), &other_key_fingerprint, false).await;
                             return Ok(key);
@@ -787,18 +790,26 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                         }),
                         session_id: session_id.clone(),
                     };
-                    let msg_enc = self.encrypt_msg(&session_id, &message).await.unwrap();
-                    let message = Message {
-                        message: MessageData::Encrypted(msg_enc),
-                        session_id: session_id.clone(),
-                    };
-                    topic_response = msg.topic;
+                    let msg_enc = self.encrypt_msg(&session_id, &message).await;
+                    if msg_enc.is_ok() {
+                        let msg_enc = msg_enc.unwrap();
 
-                    let pk = self.host_encro.lock().await.get_public_key_as_base64();
-                    self.call_callbacks_chat(&pk, &msg.message).await;
+                        let message = Message {
+                            message: MessageData::Encrypted(msg_enc),
+                            session_id: session_id.clone(),
+                        };
+                        topic_response = msg.topic;
 
-                    // Send this message
-                    return Ok((message, topic_response));
+                        let pk = self.host_encro.lock().await.get_public_key_as_base64();
+                        self.call_callbacks_chat(&pk, &msg.message).await;
+                        // Send this message
+                        return Ok((message, topic_response));
+                    } else {
+                        return Err(SessionErrorMsg {
+                            code: SessionErrorCodes::Protocol as u32,
+                            message: "Session not found".to_owned(),
+                        });
+                    }
                 } else {
                     return Err(SessionErrorMsg {
                         code: SessionErrorCodes::Protocol as u32,
@@ -892,16 +903,19 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                         let initialize_this = self.call_callbacks_initialized(&pub_key).await;
 
                         if initialize_this {
-                            {
-                                let mut hm = self.sessions.lock().await;
-                                hm.insert(key.clone(), session_data);
-                            }
-
-                            response.message = MessageData::InitOk(InitOkMsg {
-                                sym_key: sym_cipher_key_encrypted,
+                            response.message = MessageData::InitAwait(InitAwaitMsg {
+                                sym_key: sym_cipher_key_encrypted.clone(),
                                 orig_pub_key: pub_encro.get_public_key_as_base64(),
                             });
                             response.session_id = key.clone();
+                            {
+                                let msg = Message::new_init_await(
+                                    sym_cipher_key_encrypted.clone(),
+                                    pub_encro.get_public_key_as_base64(),
+                                );
+                                let mut hm = self.requests_initialization.lock().await;
+                                hm.push((key.clone(), session_data, Some(msg)));
+                            }
                             self.chat(key.clone(), &pk_1, false).await;
                             Ok((response, topic_response))
                         } else {

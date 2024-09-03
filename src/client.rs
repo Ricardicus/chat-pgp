@@ -387,72 +387,78 @@ async fn terminal_program(
     let mut print_prompt = true;
     while keep_running {
         if print_prompt {
-    print_message_str(1, ">> ").await;
+            print_message_str(1, ">> ").await;
         }
-        let input = read_message(1, "").await;
-        print_prompt = true;
-        if input.is_ok() {
-            let cmd = InputCommand::parse_from(&input.unwrap());
-            match cmd {
-                Some(InputCommand::List(_)) => {
-                    // List all discovered peers
-                    let discovered = session.get_discovered().await;
-                    let mut i = 1;
-                    for peer in discovered {
-                        let peer_decoded = base64::decode(&peer).unwrap();
-                        let peer_cert = read_from_vec(&peer_decoded).unwrap();
-                        let peer_fingerprint = peer_cert.fingerprint();
-                        let mut peer_userid = "".to_string();
-                        for uid in peer_cert.userids() {
-                            peer_userid.push_str(&uid.userid().to_string());
+        let pending = session.get_pending_request().await;
+        if pending.is_some() {
+            println_message_str(1, "There is an initialization request sent").await;
+            let r = InputCommand::read_yes_or_no(1, ">> ");
+        } else {
+            let input = read_message(1, "").await;
+            if input.is_ok() {
+                let cmd = InputCommand::parse_from(&input.unwrap());
+                match cmd {
+                    Some(InputCommand::List(_)) => {
+                        // List all discovered peers
+                        let discovered = session.get_discovered().await;
+                        let mut i = 1;
+                        for peer in discovered {
+                            let peer_decoded = base64::decode(&peer).unwrap();
+                            let peer_cert = read_from_vec(&peer_decoded).unwrap();
+                            let peer_fingerprint = peer_cert.fingerprint();
+                            let mut peer_userid = "".to_string();
+                            for uid in peer_cert.userids() {
+                                peer_userid.push_str(&uid.userid().to_string());
+                            }
+                            println_message(
+                                1,
+                                format!("-- {}: {} {}", i, peer_userid, peer_fingerprint),
+                            )
+                            .await;
+                            i += 1;
                         }
-                        println_message(
-                            1,
-                            format!("-- {}: {} {}", i, peer_userid, peer_fingerprint),
-                        )
-                        .await;
-                        i += 1;
                     }
-                }
-                Some(InputCommand::Initialize(cmd)) => {
-                    // Initialize a chat session
-                    let entry = cmd.entry;
-                    let discovered = session.get_discovered().await;
+                    Some(InputCommand::Initialize(cmd)) => {
+                        // Initialize a chat session
+                        let entry = cmd.entry;
+                        let discovered = session.get_discovered().await;
 
-                    if entry < 1 || entry > discovered.len() {
-                        println_message(1, format!("-- Invalid entry {}", entry)).await;
-                    } else {
-                        let peer = discovered[entry - 1].clone();
-                        let peer_decoded = base64::decode(&peer).unwrap();
-                        let peer_cert = read_from_vec(&peer_decoded).unwrap();
-                        let peer_fingerprint = peer_cert.fingerprint();
-                        let mut peer_userid = "".to_string();
-                        for uid in peer_cert.userids() {
-                            peer_userid.push_str(&uid.userid().to_string());
-                        }
-                        println_message(
-                            1,
-                            format!(
-                                "-- Do you want to initialize chat with {} ({})? [y/N]",
-                                peer_userid, peer_fingerprint
-                            ),
-                        )
-                        .await;
-                        let response = InputCommand::read_yes_or_no(1, ">> ").await;
-                        if response.is_err() {
+                        if entry < 1 || entry > discovered.len() {
+                            println_message(1, format!("-- Invalid entry {}", entry)).await;
                         } else {
-                            let go_further = response.unwrap();
-                            if go_further {
-                                println_message(
-                                    1,
-                                    format!(
-                                        "-- Initializing chat with {} ({})",
-                                        peer_userid, peer_fingerprint
-                                    ),
-                                )
-                                .await;
-                                let session_id =
-                                    match session.initialize_session_zenoh(peer.clone()).await {
+                            let peer = discovered[entry - 1].clone();
+                            let peer_decoded = base64::decode(&peer).unwrap();
+                            let peer_cert = read_from_vec(&peer_decoded).unwrap();
+                            let peer_fingerprint = peer_cert.fingerprint();
+                            let mut peer_userid = "".to_string();
+                            for uid in peer_cert.userids() {
+                                peer_userid.push_str(&uid.userid().to_string());
+                            }
+                            println_message(
+                                1,
+                                format!(
+                                    "-- Do you want to initialize chat with {} ({})? [y/N]",
+                                    peer_userid, peer_fingerprint
+                                ),
+                            )
+                            .await;
+                            let response = InputCommand::read_yes_or_no(1, ">> ").await;
+                            if response.is_err() {
+                            } else {
+                                let go_further = response.unwrap();
+                                if go_further {
+                                    println_message(
+                                        1,
+                                        format!(
+                                            "-- Initializing chat with {} ({})",
+                                            peer_userid, peer_fingerprint
+                                        ),
+                                    )
+                                    .await;
+                                    let session_id = match session
+                                        .initialize_session_zenoh(peer.clone())
+                                        .await
+                                    {
                                         Ok(ok) => {
                                             println!(
                                                 "-- Successfully established a session connection"
@@ -463,33 +469,32 @@ async fn terminal_program(
                                             println!("error: Failed to initiailize a session.");
                                         }
                                     };
-                            } else {
-                                println_message(
-                                    1,
-                                    format!(
-                                        "-- Chat not initialized with {} ({})",
-                                        peer_userid, peer_fingerprint
-                                    ),
-                                )
-                                .await;
+                                } else {
+                                    println_message(
+                                        1,
+                                        format!(
+                                            "-- Chat not initialized with {} ({})",
+                                            peer_userid, peer_fingerprint
+                                        ),
+                                    )
+                                    .await;
+                                }
                             }
                         }
                     }
+                    Some(InputCommand::Exit(_)) => {
+                        // Exit the program
+                        keep_running = false;
+                        terminate(session_tx.clone()).await;
+                    }
+                    Some(InputCommand::Help(_)) => {
+                        // Print help
+                        InputCommand::print_help().await;
+                    }
+                    None => {}
                 }
-                Some(InputCommand::Exit(_)) => {
-                    // Exit the program
-                    keep_running = false;
-                    terminate(session_tx.clone()).await;
-                }
-                Some(InputCommand::Help(_)) => {
-                    // Print help
-                    InputCommand::print_help().await;
-                }
-                None => {
-                    print_prompt = false;
-                }
+            } else {
             }
-        } else {
         }
     }
 }

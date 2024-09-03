@@ -158,12 +158,11 @@ impl WindowManager {
     // Make window interactive
     pub fn getch(&self, window_number: usize, prompt: &str) -> Option<String> {
         if let Some((win, subwin)) = self.windows.get(&window_number) {
-            wtimeout(*subwin, 1000);
+            //wtimeout(*subwin, 1000);
             wrefresh(*subwin);
 
             // Move the cursor to just inside the box, 1 line down, 1 column in
             if prompt.len() > 0 {
-                println!("printing something");
                 self.printw(window_number, prompt);
                 wrefresh(*subwin);
             }
@@ -179,11 +178,13 @@ impl WindowManager {
             let mut ch = wgetch(*subwin);
             while ch != '\n' as i32 {
                 if ch == ERR {
-                    wmove(*subwin, cur_y, cur_x);
+                    wmove(*subwin, cur_y - 1, cur_x);
                     // Timeout
                     if input.len() == 0 {
+                        println!("yes");
                         return None;
                     }
+                    return None;
                 } else if ch == KEY_BACKSPACE || ch == 127 {
                     if !input.is_empty() {
                         input.pop();

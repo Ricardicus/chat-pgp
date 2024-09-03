@@ -16,6 +16,11 @@ pub struct InitOkMsg {
     pub sym_key: String,
     pub orig_pub_key: String,
 }
+#[derive(Serialize, Deserialize, Clone)]
+pub struct InitAwaitMsg {
+    pub sym_key: String,
+    pub orig_pub_key: String,
+}
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct KeyPassMsg {
@@ -82,6 +87,7 @@ pub struct SessionErrorMsg {
 pub enum MessageData {
     Init(InitMsg),
     InitOk(InitOkMsg),
+    InitAwait(InitAwaitMsg),
     Close(CloseMsg),
     CloseOk(CloseOkMsg),
     Chat(ChatMsg),
@@ -175,6 +181,15 @@ impl SessionMessage {
     pub fn new_init_ok(sym_key: String, orig_pub_key: String) -> Self {
         SessionMessage {
             message: MessageData::InitOk(InitOkMsg {
+                sym_key,
+                orig_pub_key,
+            }),
+            session_id: "".to_string(),
+        }
+    }
+    pub fn new_init_await(sym_key: String, orig_pub_key: String) -> Self {
+        SessionMessage {
+            message: MessageData::InitAwait(InitAwaitMsg {
                 sym_key,
                 orig_pub_key,
             }),
