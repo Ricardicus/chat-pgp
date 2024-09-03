@@ -40,7 +40,7 @@ use futures::prelude::*;
 use zenoh::prelude::r#async::*;
 use zenoh::Config;
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Clone)]
 pub enum SessionState {
     Initializing,
     Active,
@@ -52,7 +52,7 @@ pub enum SessionState {
 pub enum SessionError {
     SessionError(SessionErrorMsg),
 }
-
+#[derive(Clone)]
 pub struct SessionData<SessionCrypto>
 where
     SessionCrypto: CrypticalEncrypt + CrypticalDecrypt,
@@ -72,6 +72,7 @@ where
 {
     pub sessions: Arc<Mutex<HashMap<String, SessionData<SessionCrypto>>>>,
     pub discovered: Arc<Mutex<HashMap<String, String>>>,
+    pub requests_initialization: Arc<Mutex<Vec<(String, SessionData<SessionCrypto>)>>>,
     pub host_encro: Arc<Mutex<HostCrypto>>,
     pub tx: mpsc::Sender<(String, String)>,
     pub tx_chat: mpsc::Sender<(String, String)>,
@@ -122,6 +123,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
         Session {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             discovered: Arc::new(Mutex::new(HashMap::new())),
+            requests_initialization: Arc::new(Mutex::new(Vec::new())),
             host_encro: Arc::new(Mutex::new(host_encro)),
             tx: tx.clone(),
             tx_chat: tx.clone(),
@@ -140,6 +142,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
         Self {
             sessions: Arc::clone(&self.sessions),
             discovered: Arc::clone(&self.discovered),
+            requests_initialization: Arc::clone(&self.requests_initialization),
             host_encro: Arc::clone(&self.host_encro),
             tx,
             tx_chat: self.tx_chat.clone(),
@@ -155,6 +158,60 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
 
     pub fn set_tx_chat(&mut self, tx: mpsc::Sender<(String, String)>) {
         self.tx_chat = tx;
+    }
+
+    pub async fn get_pending_request(
+        &self,
+    ) -> Option<(String, SessionData<ChaCha20Poly1305EnDeCrypt>)> {
+        let requests = self.requests_initialization.lock().await;
+        if requests.len() > 0 {
+            let (id, session_data) = (requests[0].0.clone(), requests[0].1.clone());
+            return Some((id.to_string(), session_data));
+        }
+        None
+    }
+
+    pub async fn accept_pending_request(&mut self, session_id: &str) -> Result<(), ()> {
+        let mut session_data = None;
+        {
+            let mut requests = self.requests_initialization.lock().await;
+            let mut index = None;
+
+            for (i, (id, sd)) in requests.iter().enumerate() {
+                if id == session_id {
+                    index = Some(i);
+                    session_data = Some(sd.clone());
+                    requests.remove(i); // Remove the request while the lock is still active
+                    break;
+                }
+            }
+
+            // Ensure the lock is dropped before proceeding
+            if session_data.is_none() {
+                return Err(());
+            }
+        }
+
+        // Proceed after the lock is dropped
+        let session_data = session_data.unwrap();
+        let key = session_data.id.clone();
+        let pub_key = session_data.pub_key.clone();
+        let pub_key_dec = base64::decode(&pub_key).expect("Failed to decode pub_key");
+        let cert = read_from_vec(&pub_key_dec);
+        if cert.is_err() {
+            return Err(());
+        }
+        let cert = cert.unwrap();
+        let fingerprint = cert.fingerprint().to_string();
+
+        {
+            let mut hm = self.sessions.lock().await;
+            hm.insert(key.clone(), session_data.clone());
+        }
+
+        self.chat(key.clone(), &fingerprint, false).await;
+
+        Ok(())
     }
 
     pub fn session_recv_msg<T: MessageListener>(
