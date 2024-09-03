@@ -81,18 +81,64 @@ struct Cli {
 static mut WINDOW_PIPE: Lazy<WindowPipe> = Lazy::new(|| WindowPipe::new());
 
 async fn print_message(window: usize, message: String) {
-    println!("print message 1 ");
     unsafe {
-        println!("window pipe send 1");
         WINDOW_PIPE
             .send(WindowCommand::Print(PrintCommand { window, message }))
             .await;
-
-        println!("widnwo pipe returned"); 
     }
 }
 
-fn cb_chat(public_key: &str, message: &str) {
+struct ListCommand {}
+struct InitializeCommand {
+    pub entry: i32,
+}
+struct ExitCommand {}
+
+enum InputCommand {
+    List(ListCommand),
+    Initialize(InitializeCommand),
+    Exit(ExitCommand),
+}
+
+impl InputCommand {
+    fn parse_from(input: &str) -> Option<Self> {
+        let mut parts = input.split_whitespace();
+        match parts.next() {
+            Some("!list") => {
+                let cmd = ListCommand {};
+                Some(InputCommand::List(cmd))
+            }
+            Some("!init") => {
+                let entry = match parts.next() {
+                    Some(entry) => entry.parse::<i32>().unwrap(),
+                    None => 0,
+                };
+                let cmd = InitializeCommand { entry };
+                Some(InputCommand::Initialize(cmd))
+            }
+            Some("!exit") => {
+                let cmd = ExitCommand {};
+                Some(InputCommand::Exit(cmd))
+            }
+            _ => None,
+        }
+    }
+
+    async fn print_help() {
+        let mut help_text = String::new();
+        help_text.push_str("Available commands:\n");
+        help_text.push_str("!list\n");
+        help_text.push_str("- List and enumerate all discovered peers.\n");
+        help_text.push_str("!init [entry]\n");
+        help_text.push_str("- Initialize a chat session with a peer\n");
+        help_text.push_str("  enumerated as per !list.\n");
+        help_text.push_str("!exit\n");
+        help_text.push_str("- Exit the chat program.\n");
+        print_message(1, help_text).await;
+    }
+}
+
+async fn cb_chat(public_key: String, message: String) {
     let pub_key_decoded = match base64::decode(public_key) {
         Err(_) => {
             return;
@@ -110,25 +156,15 @@ fn cb_chat(public_key: &str, message: &str) {
                     message
                 ),
             );
-
-            /*WINDOW_MANAGER.printw(
-                0,
-                &format!(
-                    "{} ({}): {}",
-                    pub_encro.get_public_key_fingerprint(),
-                    pub_encro.get_userid(),
-                    message
-                ),
-            );*/
         }
         _ => {}
     }
 }
 
-fn cb_chat_input(
-    _pub_key_fingerprint: &str,
-    session_id: &str,
-    topic_out: &str,
+async fn cb_chat_input(
+    _pub_key_fingerprint: String,
+    session_id: String,
+    topic_out: String,
 ) -> (String, String) {
     let prompt = ">> ".to_string();
     //let input = WINDOW_MANAGER.getch(1, &prompt);
@@ -159,35 +195,26 @@ async fn cb_discovered(public_key: String) -> bool {
     };
     match PGPEnCryptOwned::new_from_vec(&pub_key_decoded) {
         Ok(pub_encro) => {
-            println!("discovered..");
             print_message(
                 1,
                 format!(
                     "-- Discovered public key {} from {}",
                     pub_encro.get_public_key_fingerprint(),
                     pub_encro.get_userid()
-                )
-            ).await;
-            println!("sent I think");
-            /*  WINDOW_MANAGER.printw(
-                1,
-                &format!(
-                    "-- Discovered public key {} from {}",
-                    pub_encro.get_public_key_fingerprint(),
-                    pub_encro.get_userid()
                 ),
-            );*/
+            )
+            .await;
             true
         }
         _ => false,
     }
 }
 
-fn cb_terminate() {
+async fn cb_terminate() {
     print_message(1, format!("-- Terminating session ..."));
 }
 
-fn cb_initialized(public_key: &str) -> bool {
+async fn cb_initialized(public_key: String) -> bool {
     let pub_key_decoded = match base64::decode(public_key) {
         Err(_) => {
             return false;
@@ -242,44 +269,88 @@ async fn terminate(tx: mpsc::Sender<(String, String)>) {
     tx.send((topic.to_string(), msg.serialize().unwrap())).await;
 }
 
-async fn launch_terminal_program() {
-    tokio::spawn(async move {
-        let pipe;
-        unsafe {
-            pipe = WINDOW_PIPE.clone();
+async fn terminal_program(pipe: WindowPipe) {
+    // Initialize
+    pipe.send(WindowCommand::Init()).await;
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let (max_y, max_x) = WindowManager::get_max_yx();
+    let num_windows = 2;
+    let win_height = max_y / num_windows as i32;
+    let win_width = max_x;
+
+    // Create the windows
+    for i in 0..num_windows {
+        let start_y = i * win_height;
+        let window_cmd = NewWindowCommand {
+            start_y,
+            win_height,
+            win_width,
+        };
+        pipe.send(WindowCommand::New(window_cmd)).await;
+    }
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    // Serve incoming commands
+    let mut keep_running = true;
+    /*while keep_running {
+        InputCommand::print_help().await;
+        let input = pipe.get_input(1, ">> ").await;
+        if input.is_ok() {
+            let cmd = InputCommand::parse_from(&input.unwrap());
+            match cmd {
+                Some(InputCommand::List(_)) => {
+                    // List all discovered peers
+                    InputCommand::print_help().await;
+                }
+                Some(InputCommand::Initialize(cmd)) => {
+                    // Initialize a chat session
+                    let entry = cmd.entry;
+                    print_message(
+                        1,
+                        format!("-- Initializing chat session with entry {}", entry),
+                    )
+                    .await;
+                }
+                Some(InputCommand::Exit(_)) => {
+                    // Exit the program
+                    keep_running = false;
+                }
+                None => {
+                    // Print help
+                    InputCommand::print_help().await;
+                }
+            }
         }
+    }*/
+}
+
+async fn launch_terminal_program() {
+    let pipe;
+    unsafe {
+        pipe = WINDOW_PIPE.clone();
+    }
+    let pipe_clone = pipe.clone();
+    // Setup window manager serving
+    tokio::spawn(async move {
         let mut window_manager = WindowManager::new();
 
         let (tx, rx) = mpsc::channel::<String>(50);
 
         let pipe_clone = pipe.clone();
         let tx_clone = tx.clone();
-        tokio::spawn(async move {
-            // Initialize
-            let pipe = pipe_clone;
-            pipe.send(WindowCommand::Init()).await;
 
-            tokio::time::sleep(Duration::from_millis(100)).await;
-
-            let (max_y, max_x) = WindowManager::get_max_yx();
-            let num_windows = 2;
-            let win_height = max_y / num_windows as i32;
-            let win_width = max_x;
-
-            // Create the windows
-            for i in 0..num_windows {
-                let start_y = i * win_height;
-                let window_cmd = NewWindowCommand {
-                    start_y,
-                    win_height,
-                    win_width,
-                };
-                pipe.send(WindowCommand::New(window_cmd)).await;
-            }
-        });
         let tx_clone = tx_clone.clone();
-        let pipe_clone = pipe.clone();
         window_manager.serve(pipe_clone).await;
+    });
+    let pipe_clone = pipe_clone.clone();
+    // Launch window manager program
+    tokio::spawn(async move {
+        // Initialize
+        let pipe = pipe_clone;
+        // Wait for the window manager loop to be set up
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        terminal_program(pipe).await;
     });
 }
 
@@ -367,25 +438,38 @@ async fn main() {
         */
     }
 
-    // Wrap the async function `cb_discovered` into a closure that matches the expected signature
-    let async_callback = move |input: String| {
-        Box::pin(cb_discovered(input)) as Pin<Box<dyn Future<Output = bool> + Send>>
+    // Wrap the async functions into a closure that matches the signature
+    let callback_discovered = move |arg1: String| {
+        Box::pin(cb_discovered(arg1)) as Pin<Box<dyn Future<Output = bool> + Send>>
     };
+    let callback_chat = move |arg1: String, arg2: String| {
+        Box::pin(cb_chat(arg1, arg2)) as Pin<Box<dyn Future<Output = ()> + Send>>
+    };
+    let callback_initialized = move |arg1: String| {
+        Box::pin(cb_initialized(arg1)) as Pin<Box<dyn Future<Output = bool> + Send>>
+    };
+    let callback_chat_input = move |arg1: String, arg2: String, arg3: String| {
+        Box::pin(cb_chat_input(arg1, arg2, arg3))
+            as Pin<Box<dyn Future<Output = (String, String)> + Send>>
+    };
+    let callback_terminate =
+        move || Box::pin(cb_terminate()) as Pin<Box<dyn Future<Output = ()> + Send>>;
 
     // Register the async callback
-
-    session.register_callback_chat(Box::new(cb_chat)).await;
     session
-        .register_callback_initialized(Box::new(cb_initialized))
+        .register_callback_chat(Box::new(callback_chat))
         .await;
     session
-        .register_callback_discovered(Box::new(async_callback))
+        .register_callback_initialized(Box::new(callback_initialized))
         .await;
     session
-        .register_callback_chat_input(Box::new(cb_chat_input))
+        .register_callback_discovered(Box::new(callback_discovered))
         .await;
     session
-        .register_callback_terminate(Box::new(cb_terminate))
+        .register_callback_chat_input(Box::new(callback_chat_input))
+        .await;
+    session
+        .register_callback_terminate(Box::new(callback_terminate))
         .await;
 
     let mut i = 0;
@@ -400,9 +484,13 @@ async fn main() {
 
     launch_terminal_program().await;
 
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    tokio::time::sleep(Duration::from_millis(1000)).await;
 
-    print_message(1, format!("-- Using key {} {}", &pub_key_fingerprint, &pub_key_userid)).await;
+    print_message(
+        1,
+        format!("-- Using key {} {}", &pub_key_fingerprint, &pub_key_userid),
+    )
+    .await;
     /*
     if !no_discovery {
         WINDOW_MANAGER.printw(1, "-- Discovering other peers out there...");
@@ -536,7 +624,6 @@ async fn main() {
         });
     }
     WINDOW_MANAGER.printw(1, &format!("-- Awaiting other peers to connect to us..."));*/
-    session.discover().await;
     print_message(1, format!("-- Awaiting other peers to connect to us..."));
     session.serve().await;
 }

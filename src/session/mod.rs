@@ -76,13 +76,42 @@ where
     pub tx: mpsc::Sender<(String, String)>,
     pub tx_chat: mpsc::Sender<(String, String)>,
     pub rx: mpsc::Receiver<(String, String)>,
-    pub callbacks_chat: Arc<Mutex<Vec<Box<dyn Fn(&str, &str) + Send>>>>,
+    pub callbacks_chat: Arc<
+        Mutex<
+            Vec<
+                Box<
+                    dyn Fn(String, String) -> Pin<Box<dyn Future<Output = ()> + Send>>
+                        + Send
+                        + Sync,
+                >,
+            >,
+        >,
+    >,
 
-    pub callbacks_discovered: Arc<Mutex<Vec<Box<dyn Fn(String) -> Pin<Box<dyn Future<Output = bool> + Send>> + Send + Sync>>>>,
-    pub callbacks_initialized: Arc<Mutex<Vec<Box<dyn Fn(&str) -> bool + Send>>>>,
-    pub callbacks_terminate: Arc<Mutex<Vec<Box<dyn Fn() + Send>>>>,
-    pub callbacks_chat_input:
-        Arc<Mutex<Vec<Box<dyn Fn(&str, &str, &str) -> (String, String) + Send + Sync>>>>,
+    pub callbacks_discovered: Arc<
+        Mutex<Vec<Box<dyn Fn(String) -> Pin<Box<dyn Future<Output = bool> + Send>> + Send + Sync>>>,
+    >,
+    pub callbacks_initialized: Arc<
+        Mutex<Vec<Box<dyn Fn(String) -> Pin<Box<dyn Future<Output = bool> + Send>> + Send + Sync>>>,
+    >,
+    pub callbacks_terminate:
+        Arc<Mutex<Vec<Box<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>>>>,
+    pub callbacks_chat_input: Arc<
+        Mutex<
+            Vec<
+                Box<
+                    dyn Fn(
+                            String,
+                            String,
+                            String,
+                        )
+                            -> Pin<Box<dyn Future<Output = (String, String)> + Send>>
+                        + Send
+                        + Sync,
+                >,
+            >,
+        >,
+    >,
 
     pub middleware_config: String,
 }
@@ -193,26 +222,44 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
     }
 
     // Register a new callback
-    pub async fn register_callback_chat(&self, callback: Box<dyn Fn(&str, &str) + Send>) {
+    pub async fn register_callback_chat(
+        &self,
+        callback: Box<
+            dyn Fn(String, String) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync,
+        >,
+    ) {
         let mut callbacks = self.callbacks_chat.lock().await;
         callbacks.push(callback);
     }
-pub async fn register_callback_discovered(&self, callback: Box<dyn Fn(String) -> Pin<Box<dyn Future<Output = bool> + Send>> + Send + Sync>) {
-    let mut callbacks = self.callbacks_discovered.lock().await;
-    callbacks.push(callback);
-}
+    pub async fn register_callback_discovered(
+        &self,
+        callback: Box<dyn Fn(String) -> Pin<Box<dyn Future<Output = bool> + Send>> + Send + Sync>,
+    ) {
+        let mut callbacks = self.callbacks_discovered.lock().await;
+        callbacks.push(callback);
+    }
 
-    pub async fn register_callback_initialized(&self, callback: Box<dyn Fn(&str) -> bool + Send>) {
+    pub async fn register_callback_initialized(
+        &self,
+        callback: Box<dyn Fn(String) -> Pin<Box<dyn Future<Output = bool> + Send>> + Send + Sync>,
+    ) {
         let mut callbacks = self.callbacks_initialized.lock().await;
         callbacks.push(callback);
     }
-    pub async fn register_callback_terminate(&self, callback: Box<dyn Fn() + Send>) {
+    pub async fn register_callback_terminate(
+        &self,
+        callback: Box<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>,
+    ) {
         let mut callbacks = self.callbacks_terminate.lock().await;
         callbacks.push(callback);
     }
     pub async fn register_callback_chat_input(
         &self,
-        callback: Box<dyn Fn(&str, &str, &str) -> (String, String) + Send + Sync>,
+        callback: Box<
+            dyn Fn(String, String, String) -> Pin<Box<dyn Future<Output = (String, String)> + Send>>
+                + Send
+                + Sync,
+        >,
     ) {
         let mut callbacks = self.callbacks_chat_input.lock().await;
         callbacks.push(callback);
@@ -221,19 +268,19 @@ pub async fn register_callback_discovered(&self, callback: Box<dyn Fn(String) ->
     async fn call_callbacks_chat(&self, arg1: &str, arg2: &str) {
         let callbacks = self.callbacks_chat.lock().await;
         for callback in callbacks.iter() {
-            callback(arg1, arg2);
+            callback(arg1.to_string(), arg2.to_string());
         }
     }
     async fn call_callbacks_terminate(&self) {
         let callbacks = self.callbacks_terminate.lock().await;
         for callback in callbacks.iter() {
-            callback();
+            callback().await;
         }
     }
     async fn call_callbacks_initialized(&self, arg1: &str) -> bool {
         let callbacks = self.callbacks_initialized.lock().await;
         for callback in callbacks.iter() {
-            if !callback(arg1) {
+            if !callback(arg1.to_string()).await {
                 return false;
             }
         }
@@ -389,7 +436,12 @@ pub async fn register_callback_discovered(&self, callback: Box<dyn Fn(String) ->
             loop {
                 let callbacks = callbacks.lock().await;
                 for callback in callbacks.iter() {
-                    let (topic, msg) = callback(&other_key_fingerprint, &session_id, &topic_out);
+                    let (topic, msg) = callback(
+                        other_key_fingerprint.clone(),
+                        session_id.clone(),
+                        topic_out.clone(),
+                    )
+                    .await;
                     if let Err(e) = tx_clone.send((topic, msg)).await {}
                 }
             }
@@ -425,8 +477,28 @@ pub async fn register_callback_discovered(&self, callback: Box<dyn Fn(String) ->
         let zenoh_session_responder =
             Arc::new(Mutex::new(zenoh::open(zenoh_config).res().await.unwrap()));
         let responder = ZenohHandler::new(zenoh_session_responder);
-        let mut keep_running = true;
-        while keep_running {
+        let mut keep_running: Arc<Mutex<bool>> = Arc::new(Mutex::new(true));
+        // Send discover message each minut
+        let mut session_discover = self.clone();
+        let mut keep_running_discover = keep_running.clone();
+        tokio::spawn(async move {
+            let mut seconds = 0;
+            let mut keep_running;
+            {
+                keep_running = *keep_running_discover.lock().await;
+            }
+            while keep_running {
+                if seconds % 60 == 0 {
+                    session_discover.discover().await;
+                }
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                seconds += 1;
+                {
+                    keep_running = *keep_running_discover.lock().await;
+                }
+            }
+        });
+        while *keep_running.lock().await {
             let mut received = self.rx.recv().await.expect("Error in session");
             let topic = received.0;
             let mut topic_response = topic.clone();
@@ -441,7 +513,7 @@ pub async fn register_callback_discovered(&self, callback: Box<dyn Fn(String) ->
                             let response = res.0;
                             let topic_response = res.1;
                             if topic_response == "terminate" {
-                                keep_running = false;
+                                *keep_running.lock().await = false;
                                 continue;
                             }
                             let m = response.clone();

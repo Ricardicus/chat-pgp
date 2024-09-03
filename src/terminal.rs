@@ -79,7 +79,6 @@ impl WindowPipe {
     }
 
     pub async fn send(&self, cmd: WindowCommand) {
-        println!("sending {:?}", cmd);
         let _ = self.tx.lock().await.send(cmd).await;
     }
 
@@ -247,7 +246,6 @@ impl WindowManager {
                         let _ = pipe.tx_input.lock().await.send(input).await;
                     }
                     WindowCommand::Print(cmd) => {
-                        println!("print {} {}", cmd.window, &cmd.message);
                         self.printw(cmd.window, &cmd.message);
                     }
                     WindowCommand::New(cmd) => {
@@ -259,13 +257,9 @@ impl WindowManager {
                     WindowCommand::Shutdown() => {
                         keep_running = false;
                     }
-                    _ => {
-                        println!("No match");
-                    }
+                    _ => {}
                 },
-                Err(()) => {
-                    println!("Error incoming..");
-                }
+                Err(()) => {}
             }
         }
         self.cleanup();
