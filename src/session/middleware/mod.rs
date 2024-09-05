@@ -5,16 +5,11 @@ use crate::session::messages::{
 };
 use crate::session::Session;
 
-use async_std::task;
-use std::collections::HashMap;
-use std::env;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Mutex};
-use zenoh::prelude::r#async::*;
 use zenoh::prelude::*;
 
-use futures::prelude::*;
 use tokio::time::timeout;
 
 pub struct ZMQHandler {

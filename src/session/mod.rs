@@ -135,7 +135,7 @@ where
 
 impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
     pub fn new(host_encro: PGPEnDeCrypt, middleware_config: String) -> Self {
-        let (tx, mut rx) = mpsc::channel(100);
+        let (tx, rx) = mpsc::channel(100);
         Session {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             discovered: Arc::new(Mutex::new(HashMap::new())),
@@ -160,7 +160,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
     }
 
     pub fn clone(&self) -> Self {
-        let (tx, mut rx) = mpsc::channel(100);
+        let (tx, rx) = mpsc::channel(100);
         Self {
             sessions: Arc::clone(&self.sessions),
             discovered: Arc::clone(&self.discovered),
@@ -613,7 +613,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
         let responder = ZenohHandler::new(zenoh_session_responder);
         // Send discover message each minut
         let mut session_discover = self.clone();
-        let mut keep_running_discover = self.running.clone();
+        let keep_running_discover = self.running.clone();
         tokio::spawn(async move {
             let mut seconds = 0;
             let mut keep_running;
@@ -631,18 +631,16 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                 }
             }
         });
-        let mut keep_running = self.running.clone();
+        let keep_running = self.running.clone();
         while *keep_running.lock().await {
-            let mut received = self.rx.recv().await.expect("Error in session");
+            let received = self.rx.recv().await.expect("Error in session");
             let topic = received.0;
-            let mut topic_response = topic.clone();
             let mut topic_error = Topic::Errors.as_str().to_string();
             topic_error.push_str("/");
             topic_error.push_str(&pub_key);
-            let msg = match Message::deserialize(&received.1) {
+            let _msg = match Message::deserialize(&received.1) {
                 Ok(msg) => {
                     let session_id = msg.session_id.clone();
-                    let msg_clone = msg.clone();
                     match self.handle_message(msg, &topic).await {
                         Ok(Some(res)) => {
                             // Do something
@@ -652,7 +650,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                                 *keep_running.lock().await = false;
                                 continue;
                             }
-                            let m = response.clone();
+                            let _ = response.clone();
                             let _ = responder
                                 .send_message(&topic_response, response.clone())
                                 .await;
@@ -662,9 +660,9 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                             //println!("errormessage {:?}", errormessage);
                             let response = Message {
                                 message: MessageData::SessionError(errormessage),
-                                session_id: session_id,
+                                session_id,
                             };
-                            let rs = response.to_string();
+                            let _ = response.to_string();
                             let _ = responder.send_message(&topic_error, response).await;
                         }
                     }
@@ -695,10 +693,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
             Arc::new(Mutex::new(zenoh::open(zenoh_config).res().await.unwrap()));
         let responder = ZenohHandler::new(zenoh_session_responder);
 
-        let mut msg_count = 0;
-
         while let Some(received) = self.rx.recv().await {
-            msg_count += 1;
             let topic = received.0;
             let mut topic_response = topic.clone();
 
@@ -727,7 +722,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                 Err(_) => {}
             };
             {
-                let mut hm = self.sessions.lock().await;
+                let hm = self.sessions.lock().await;
                 if hm.len() > 0 {
                     thread::spawn(|| {
                         // Sleep for 3 seconds
@@ -855,7 +850,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
         let mut response = Message::new_chat("Hello World".to_string());
         response.session_id = message.session_id.clone();
         let session_id = message.session_id.clone();
-        let msg_raw = message.to_string();
+        let _msg_raw = message.to_string();
 
         match message.message {
             Internal(msg) => {
@@ -1129,7 +1124,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                     let other_key_fingerprint = cert.fingerprint().to_string();
 
                     for pending in pendings.iter() {
-                        let mut pending_pub_key_fingerprint = pending.clone();
+                        let pending_pub_key_fingerprint = pending.clone();
                         if other_key_fingerprint == pending_pub_key_fingerprint {
                             // Add this to the sessions to add
                             add_session = Some(msg.pub_key.clone())

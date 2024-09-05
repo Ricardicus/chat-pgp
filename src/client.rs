@@ -1,37 +1,20 @@
 #![allow(dead_code)]
 mod session;
 
+use once_cell::sync::Lazy;
+use serde::{Deserialize, Serialize};
 use session::crypto::{
     ChaCha20Poly1305EnDeCrypt, Cryptical, CrypticalID, PGPEnCryptOwned, PGPEnDeCrypt,
 };
-use session::messages::MessageData::Discovery;
-use session::messages::{
-    ChatMsg, DiscoveryMsg, EncryptedMsg, InitMsg, MessageData, MessageListener, Messageble,
-    MessagebleTopicAsync, SessionMessage,
-};
+use session::messages::SessionMessage;
 use session::protocol::*;
 use session::Session;
+use std::future::Future;
+use std::pin::Pin;
 use std::process::exit;
-use std::thread;
-use zenoh::prelude::r#async::*;
-use zenoh::prelude::*;
-use zenoh::Config;
-
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::signal;
-use tokio::sync::{mpsc, Mutex};
-use tokio::time::timeout;
-
-use serde::{Deserialize, Serialize};
-
-use std::env;
-use std::io::{self, Write};
-use std::pin::Pin;
-
-use std::future::Future;
-
-use once_cell::sync::Lazy;
+use tokio::sync::mpsc;
 
 mod util;
 
@@ -66,10 +49,6 @@ struct Cli {
     #[clap(long)]
     #[arg(default_value = "false")]
     test_receiver: bool,
-
-    #[clap(long)]
-    #[arg(default_value = "false")]
-    no_discovery: bool,
 
     #[clap(long)]
     #[arg(default_value = "false")]
@@ -626,23 +605,13 @@ async fn launch_terminal_program(
     tokio::spawn(async move {
         let mut window_manager = WindowManager::new();
 
-        let (tx, rx) = mpsc::channel::<String>(50);
-
         let pipe_clone = pipe0.clone();
-        let tx_clone = tx.clone();
-
-        let tx_clone = tx_clone.clone();
         window_manager.serve(pipe_clone).await;
     });
     tokio::spawn(async move {
         let mut window_manager = WindowManager::new();
 
-        let (tx, rx) = mpsc::channel::<String>(50);
-
         let pipe_clone = pipe1.clone();
-        let tx_clone = tx.clone();
-
-        let tx_clone = tx_clone.clone();
         window_manager.serve(pipe_clone).await;
     });
     let pipe0;
@@ -714,7 +683,6 @@ async fn main() {
     let test_sender = cli.test_sender;
     let test_receiver = cli.test_receiver;
     let zenoh_config = cli.zenoh_config;
-    let no_discovery = cli.no_discovery;
 
     let mut cert = None;
 
@@ -744,13 +712,7 @@ async fn main() {
     let cert = Arc::new(cert.unwrap());
 
     let pgp_handler = PGPEnDeCrypt::new(cert.clone(), &passphrase);
-    let pub_key_fingerprint = pgp_handler.get_public_key_fingerprint();
-    let pub_key_userid = pgp_handler.get_userid();
-    let pub_key_full = pgp_handler.get_public_key_as_base64();
-
     let mut session = Session::new(pgp_handler, zenoh_config.clone());
-
-    let zenoh_config = Config::from_file(zenoh_config).unwrap();
 
     if test_receiver {
         println!("-- Testing initiailize session [receiver]");

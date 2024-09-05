@@ -198,7 +198,7 @@ impl WindowManager {
         upper_prompt: &str,
         wait_time_seconds: i32,
     ) -> Option<String> {
-        if let Some((win, subwin)) = self.windows.get(&window_number) {
+        if let Some((_win, subwin)) = self.windows.get(&window_number) {
             wtimeout(*subwin, wait_time_seconds * 1000);
             wrefresh(*subwin);
 

@@ -4,7 +4,6 @@ use chacha20poly1305::{
     aead::{Aead, AeadCore, KeyInit, OsRng},
     ChaCha20Poly1305,
 };
-use openpgp::cert::prelude::*;
 use openpgp::policy::StandardPolicy as P;
 use openpgp::Cert;
 
