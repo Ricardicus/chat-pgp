@@ -136,7 +136,7 @@ async fn read_message(
     }
     input
 }
-async fn read_chat_message(window: usize) -> Result<String, ()> {
+async fn read_chat_message(window: usize) -> Result<Option<String>, ()> {
     let mut input = Err(());
     if window == 0 {
         unsafe {
@@ -149,7 +149,7 @@ async fn read_chat_message(window: usize) -> Result<String, ()> {
     }
     input
 }
-async fn send_chat_message(window: usize, message: String) {
+async fn send_chat_message(window: usize, message: Option<String>) {
     if window == 0 {
         unsafe {
             PIPE_WIN0.tx_chat_input(message).await;
@@ -283,6 +283,10 @@ async fn cb_chat_input(
         return None;
     }
     let input = input.unwrap();
+    if input.is_none() {
+        return None;
+    }
+    let input = input.unwrap();
     let topic = Topic::Internal.as_str();
     let mut msg = SessionMessage::new_internal(
         session_id.to_string(),
@@ -405,6 +409,7 @@ async fn terminate(session_tx: mpsc::Sender<(String, String)>) {
     );
     pipe0.send(WindowCommand::Shutdown()).await;
     pipe1.send(WindowCommand::Shutdown()).await;
+    send_chat_message(1, None).await;
 
     tokio::time::sleep(Duration::from_millis(200)).await;
     let _ = session_tx
@@ -593,11 +598,12 @@ async fn terminal_program(
                     None => {
                         // Send this input to listeners
                         if input.len() > 0 && session.get_number_of_sessions().await > 0 {
-                            send_chat_message(1, input).await;
+                            send_chat_message(1, Some(input)).await;
                         }
                     }
                 }
             } else {
+                keep_running = false;
             }
         }
     }
@@ -649,10 +655,13 @@ async fn launch_terminal_program(
     }
 
     // Initialize
-    println!("Initializing {}", cert.fingerprint());
+    println!(
+        "Initializing chat-pgp with fingerprint {}",
+        cert.fingerprint()
+    );
     pipe0.send(WindowCommand::Init()).await;
 
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
 
     let pgp_handler = PGPEnDeCrypt::new_no_certpass(cert.clone());
     let pub_key_fingerprint = pgp_handler.get_public_key_fingerprint();
@@ -691,6 +700,7 @@ async fn launch_terminal_program(
         // Wait for the window manager loops to be set up
         tokio::time::sleep(Duration::from_millis(400)).await;
         terminal_program(session_tx, cert, session).await;
+        println!("terminal program returning");
     });
 }
 
@@ -830,7 +840,6 @@ async fn main() {
         let c = tokio::signal::ctrl_c().await;
         if c.is_ok() {
             terminate(tx).await;
-            println!("terminate called");
         }
     });
 

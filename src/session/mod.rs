@@ -579,7 +579,6 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                     keep_running = *running.lock().await;
                 }
             }
-            println!("bye bye from chat");
         });
 
         if blocking {
@@ -612,10 +611,9 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
         let zenoh_session_responder =
             Arc::new(Mutex::new(zenoh::open(zenoh_config).res().await.unwrap()));
         let responder = ZenohHandler::new(zenoh_session_responder);
-        let mut keep_running: Arc<Mutex<bool>> = Arc::new(Mutex::new(true));
         // Send discover message each minut
         let mut session_discover = self.clone();
-        let mut keep_running_discover = keep_running.clone();
+        let mut keep_running_discover = self.running.clone();
         tokio::spawn(async move {
             let mut seconds = 0;
             let mut keep_running;
@@ -633,6 +631,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                 }
             }
         });
+        let mut keep_running = self.running.clone();
         while *keep_running.lock().await {
             let mut received = self.rx.recv().await.expect("Error in session");
             let topic = received.0;
@@ -660,7 +659,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                         }
                         Ok(None) => {}
                         Err(errormessage) => {
-                            println!("errormessage {:?}", errormessage);
+                            //println!("errormessage {:?}", errormessage);
                             let response = Message {
                                 message: MessageData::SessionError(errormessage),
                                 session_id: session_id,

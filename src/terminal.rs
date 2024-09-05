@@ -4,8 +4,7 @@ use std::marker::PhantomData;
 
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
-
-use std::time::Duration;
+use tokio::time::{timeout, Duration};
 
 use serde::{Deserialize, Serialize};
 
@@ -52,8 +51,8 @@ pub struct WindowPipe {
     pub rx: Arc<Mutex<mpsc::Receiver<WindowCommand>>>,
     pub tx_input: Arc<Mutex<mpsc::Sender<String>>>,
     pub rx_input: Arc<Mutex<mpsc::Receiver<String>>>,
-    pub tx_chat_input: Arc<Mutex<mpsc::Sender<String>>>,
-    pub rx_chat_input: Arc<Mutex<mpsc::Receiver<String>>>,
+    pub tx_chat_input: Arc<Mutex<mpsc::Sender<Option<String>>>>,
+    pub rx_chat_input: Arc<Mutex<mpsc::Receiver<Option<String>>>>,
 }
 
 impl WindowPipe {
@@ -111,24 +110,26 @@ impl WindowPipe {
         {
             rx = self.rx_input.lock().await;
         }
+
         match rx.recv().await {
             Some(msg) => Ok(msg),
             None => Err(()),
         }
     }
 
-    pub async fn get_chat_input(&self) -> Result<String, ()> {
+    pub async fn get_chat_input(&self) -> Result<Option<String>, ()> {
         let mut rx;
         {
             rx = self.rx_chat_input.lock().await;
         }
         match rx.recv().await {
-            Some(msg) => Ok(msg),
+            Some(Some(msg)) => Ok(Some(msg)),
+            Some(None) => Ok(None),
             None => Err(()),
         }
     }
 
-    pub async fn tx_chat_input(&self, msg: String) {
+    pub async fn tx_chat_input(&self, msg: Option<String>) {
         let _ = self.tx_chat_input.lock().await.send(msg).await;
     }
 }
@@ -238,10 +239,6 @@ impl WindowManager {
             while ch != '\n' as i32 && self.keep_running {
                 if ch == ERR {
                     wmove(*subwin, cur_y, cur_x);
-                    // Timeout
-                    if input.len() == 0 {
-                        return None;
-                    }
                     return None;
                 } else if ch == KEY_BACKSPACE || ch == 127 {
                     if !input.is_empty() {
@@ -253,6 +250,10 @@ impl WindowManager {
                 }
                 wrefresh(*subwin);
                 ch = wgetch(*subwin);
+            }
+            if ch as i32 == 10 && input.len() == 0 {
+                wmove(*subwin, cur_y, cur_x);
+                return None;
             }
 
             let utf8 = std::str::from_utf8(input.as_slice());
