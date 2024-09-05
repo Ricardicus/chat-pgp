@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 pub struct WindowManager {
     windows: HashMap<usize, (WINDOW, WINDOW)>,
+    keep_running: bool,
 }
 
 unsafe impl Send for WindowManager {}
@@ -25,6 +26,8 @@ pub struct PrintCommand {
 pub struct ReadCommand {
     pub window: usize,
     pub prompt: String,
+    pub upper_prompt: String,
+    pub timeout: i32,
 }
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct NewWindowCommand {
@@ -49,17 +52,22 @@ pub struct WindowPipe {
     pub rx: Arc<Mutex<mpsc::Receiver<WindowCommand>>>,
     pub tx_input: Arc<Mutex<mpsc::Sender<String>>>,
     pub rx_input: Arc<Mutex<mpsc::Receiver<String>>>,
+    pub tx_chat_input: Arc<Mutex<mpsc::Sender<String>>>,
+    pub rx_chat_input: Arc<Mutex<mpsc::Receiver<String>>>,
 }
 
 impl WindowPipe {
     pub fn new() -> Self {
         let (tx, rx) = mpsc::channel(50);
         let (tx_input, rx_input) = mpsc::channel(50);
+        let (tx_chat_input, rx_chat_input) = mpsc::channel(50);
         Self {
             tx: Arc::new(Mutex::new(tx)),
             rx: Arc::new(Mutex::new(rx)),
             tx_input: Arc::new(Mutex::new(tx_input)),
             rx_input: Arc::new(Mutex::new(rx_input)),
+            tx_chat_input: Arc::new(Mutex::new(tx_chat_input)),
+            rx_chat_input: Arc::new(Mutex::new(rx_chat_input)),
         }
     }
 
@@ -69,6 +77,8 @@ impl WindowPipe {
             rx: self.rx.clone(),
             tx_input: self.tx_input.clone(),
             rx_input: self.rx_input.clone(),
+            tx_chat_input: self.tx_chat_input.clone(),
+            rx_chat_input: self.rx_chat_input.clone(),
         }
     }
 
@@ -83,10 +93,18 @@ impl WindowPipe {
         let _ = self.tx.lock().await.send(cmd).await;
     }
 
-    pub async fn get_input(&self, window: usize, prompt: &str) -> Result<String, ()> {
+    pub async fn get_input(
+        &self,
+        window: usize,
+        prompt: &str,
+        upper_prompt: &str,
+        timeout: i32,
+    ) -> Result<String, ()> {
         let cmd = ReadCommand {
             window,
             prompt: prompt.to_string(),
+            upper_prompt: upper_prompt.to_string(),
+            timeout,
         };
         let _ = self.tx.lock().await.send(WindowCommand::Read(cmd)).await;
         let mut rx;
@@ -98,12 +116,28 @@ impl WindowPipe {
             None => Err(()),
         }
     }
+
+    pub async fn get_chat_input(&self) -> Result<String, ()> {
+        let mut rx;
+        {
+            rx = self.rx_chat_input.lock().await;
+        }
+        match rx.recv().await {
+            Some(msg) => Ok(msg),
+            None => Err(()),
+        }
+    }
+
+    pub async fn tx_chat_input(&self, msg: String) {
+        let _ = self.tx_chat_input.lock().await.send(msg).await;
+    }
 }
 
 impl WindowManager {
     pub fn new() -> Self {
         WindowManager {
             windows: HashMap::new(),
+            keep_running: true,
         }
     }
     pub fn init(&self) {
@@ -136,7 +170,7 @@ impl WindowManager {
 
     // Print a message to a specific window
     pub fn printw(&self, window_number: usize, message: &str) {
-        if let Some((win, subwin)) = self.windows.get(&window_number) {
+        if let Some((_win, subwin)) = self.windows.get(&window_number) {
             // Print the message in the window
             wprintw(*subwin, message);
             wrefresh(*subwin); // Refresh the window to display the new content
@@ -156,32 +190,56 @@ impl WindowManager {
     }
 
     // Make window interactive
-    pub fn getch(&self, window_number: usize, prompt: &str) -> Option<String> {
+    pub fn getch(
+        &self,
+        window_number: usize,
+        prompt: &str,
+        upper_prompt: &str,
+        wait_time_seconds: i32,
+    ) -> Option<String> {
         if let Some((win, subwin)) = self.windows.get(&window_number) {
-            //wtimeout(*subwin, 1000);
+            wtimeout(*subwin, wait_time_seconds * 1000);
             wrefresh(*subwin);
 
+            nocbreak();
+            echo();
+            curs_set(CURSOR_VISIBILITY::CURSOR_VISIBLE);
+
+            let mut orig_y = 0;
+            let mut orig_x = 0;
+            getyx(*subwin, &mut orig_y, &mut orig_x);
+
+            wmove(*subwin, 0, 0);
+            let mut rows_added = 0;
+            for line in upper_prompt.lines() {
+                wprintw(*subwin, line);
+                wrefresh(*subwin);
+                rows_added += 1;
+                wmove(*subwin, rows_added, 0);
+            }
+
+            if orig_y < rows_added {
+                wmove(*subwin, rows_added, orig_x);
+            } else {
+                wmove(*subwin, orig_y, orig_x);
+            }
             // Move the cursor to just inside the box, 1 line down, 1 column in
             if prompt.len() > 0 {
                 self.printw(window_number, prompt);
                 wrefresh(*subwin);
             }
             let mut input = Vec::<u8>::new();
-            nocbreak();
-            echo();
-            curs_set(CURSOR_VISIBILITY::CURSOR_VISIBLE);
 
             // Handle user input
             let mut cur_y = 0;
             let mut cur_x = 0;
             getyx(*subwin, &mut cur_y, &mut cur_x);
             let mut ch = wgetch(*subwin);
-            while ch != '\n' as i32 {
+            while ch != '\n' as i32 && self.keep_running {
                 if ch == ERR {
-                    wmove(*subwin, cur_y - 1, cur_x);
+                    wmove(*subwin, cur_y, cur_x);
                     // Timeout
                     if input.len() == 0 {
-                        println!("yes");
                         return None;
                     }
                     return None;
@@ -197,14 +255,13 @@ impl WindowManager {
                 ch = wgetch(*subwin);
             }
 
-            // Exit condition (optional)
-            return Some(
-                std::str::from_utf8(input.as_slice())
-                    .unwrap()
-                    .to_string()
-                    .trim()
-                    .to_string(),
-            );
+            let utf8 = std::str::from_utf8(input.as_slice());
+            if utf8.is_err() {
+                return None;
+            } else {
+                // Exit condition (optional)
+                return Some(utf8.unwrap().to_string().trim().to_string());
+            }
         } else {
             None
         }
@@ -220,18 +277,19 @@ impl WindowManager {
     }
 
     pub async fn serve(&mut self, pipe: WindowPipe) {
-        let mut keep_running = true;
-        while keep_running {
+        while self.keep_running {
             match pipe.read().await {
                 Ok(command) => match command {
-                    WindowCommand::Read(cmd) => match self.getch(cmd.window, &cmd.prompt) {
-                        Some(input) => {
-                            let _ = pipe.tx_input.lock().await.send(input).await;
+                    WindowCommand::Read(cmd) => {
+                        match self.getch(cmd.window, &cmd.prompt, &cmd.upper_prompt, cmd.timeout) {
+                            Some(input) => {
+                                let _ = pipe.tx_input.lock().await.send(input).await;
+                            }
+                            None => {
+                                let _ = pipe.tx_input.lock().await.send("".to_string()).await;
+                            }
                         }
-                        None => {
-                            let _ = pipe.tx_input.lock().await.send("".to_string()).await;
-                        }
-                    },
+                    }
                     WindowCommand::Println(cmd) => {
                         self.printw(cmd.window, &format!("{}\n", cmd.message));
                     }
@@ -245,7 +303,7 @@ impl WindowManager {
                         self.init();
                     }
                     WindowCommand::Shutdown() => {
-                        keep_running = false;
+                        self.keep_running = false;
                     }
                     _ => {}
                 },

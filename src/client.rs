@@ -114,19 +114,53 @@ async fn print_message(window: usize, message: String) {
         }
     }
 }
-async fn read_message(window: usize, prompt: &str) -> Result<String, ()> {
+async fn read_message(
+    window: usize,
+    prompt: &str,
+    upper_prompt: &str,
+    timeout: i32,
+) -> Result<String, ()> {
     let mut input = Err(());
     if window == 0 {
         unsafe {
-            input = PIPE_WIN0.get_input(window, prompt).await;
+            input = PIPE_WIN0
+                .get_input(window, prompt, upper_prompt, timeout)
+                .await;
         }
     } else {
         unsafe {
-            input = PIPE_WIN1.get_input(window, prompt).await;
+            input = PIPE_WIN1
+                .get_input(window, prompt, upper_prompt, timeout)
+                .await;
         }
     }
     input
 }
+async fn read_chat_message(window: usize) -> Result<String, ()> {
+    let mut input = Err(());
+    if window == 0 {
+        unsafe {
+            input = PIPE_WIN0.get_chat_input().await;
+        }
+    } else {
+        unsafe {
+            input = PIPE_WIN1.get_chat_input().await;
+        }
+    }
+    input
+}
+async fn send_chat_message(window: usize, message: String) {
+    if window == 0 {
+        unsafe {
+            PIPE_WIN0.tx_chat_input(message).await;
+        }
+    } else {
+        unsafe {
+            PIPE_WIN1.tx_chat_input(message).await;
+        }
+    }
+}
+
 async fn println_message_str(window: usize, message: &str) {
     println_message(window, message.to_string()).await;
 }
@@ -194,10 +228,13 @@ impl InputCommand {
         println_message_str(1, "- Exit the program.").await;
     }
     async fn print_small_help() {
-        println_message_str(1, "Type !exit to exit and !help for more commands.").await;
+        println_message(1, InputCommand::get_small_help()).await;
+    }
+    fn get_small_help() -> String {
+        "Type !exit to exit and !help for more commands.".to_string()
     }
     async fn read_yes_or_no(window: usize, prompt: &str) -> Result<bool, ()> {
-        let input = read_message(window, prompt).await;
+        let input = read_message(window, prompt, "", 60).await;
         match input {
             Ok(input) => {
                 if input.to_lowercase().starts_with('y') {
@@ -228,7 +265,8 @@ async fn cb_chat(public_key: String, message: String) {
                     pub_encro.get_userid(),
                     message
                 ),
-            );
+            )
+            .await;
         }
         _ => {}
     }
@@ -238,16 +276,22 @@ async fn cb_chat_input(
     _pub_key_fingerprint: String,
     session_id: String,
     topic_out: String,
-) -> (String, String) {
+) -> Option<(String, String)> {
     let prompt = ">> ".to_string();
-    //let input = WINDOW_MANAGER.getch(1, &prompt);
-    let input = "".to_string(); // input.trim();
+    let mut input = read_chat_message(1).await;
+    if input.is_err() {
+        return None;
+    }
+    let input = input.unwrap();
     let topic = Topic::Internal.as_str();
     let mut msg = SessionMessage::new_internal(
         session_id.to_string(),
         input.to_string(),
         topic_out.to_string(),
     );
+    if input.len() == 0 {
+        return None;
+    }
     if input == "!exit" {
         // Special message that terminate the session
         msg = SessionMessage::new_internal(
@@ -256,7 +300,7 @@ async fn cb_chat_input(
             topic.to_string(),
         );
     }
-    return (topic.to_string(), msg.serialize().unwrap());
+    return Some((topic.to_string(), msg.serialize().unwrap()));
 }
 
 async fn cb_discovered(public_key: String) -> bool {
@@ -273,10 +317,62 @@ async fn cb_discovered(public_key: String) -> bool {
 }
 
 async fn cb_terminate() {
-    println_message(1, format!("-- Terminating session ..."));
+    println_message(1, format!("-- Terminating session ...")).await;
 }
 
-async fn cb_initialized(public_key: String) -> bool {
+async fn cb_init_declined(public_key: String) {
+    let pub_key_decoded = match base64::decode(public_key) {
+        Err(_) => {
+            return;
+        }
+        Ok(pub_key) => pub_key,
+    };
+    match PGPEnCryptOwned::new_from_vec(&pub_key_decoded) {
+        Ok(pub_encro) => {
+            println_message(
+                1,
+                format!(
+                    "-- {} declined our chat request ¯\\_(´_´)_/¯...",
+                    pub_encro.get_userid()
+                ),
+            )
+            .await;
+        }
+        _ => {}
+    }
+}
+
+async fn cb_init_await(public_key: String) {
+    let pub_key_decoded = match base64::decode(public_key) {
+        Err(_) => {
+            return;
+        }
+        Ok(pub_key) => pub_key,
+    };
+    match PGPEnCryptOwned::new_from_vec(&pub_key_decoded) {
+        Ok(pub_encro) => {
+            println_message(
+                1,
+                format!(
+                    "-- Awaiting for {} to accept our request ...",
+                    pub_encro.get_userid()
+                ),
+            )
+            .await;
+        }
+        _ => {}
+    }
+}
+
+async fn cb_init_accepted(public_key: String) {
+    println_message(
+        1,
+        format!("-- Peer accepted the connection. You can now chat!"),
+    )
+    .await;
+}
+
+async fn cb_init_incoming(public_key: String) -> bool {
     let pub_key_decoded = match base64::decode(public_key) {
         Err(_) => {
             return false;
@@ -284,60 +380,9 @@ async fn cb_initialized(public_key: String) -> bool {
         Ok(pub_key) => pub_key,
     };
     match PGPEnCryptOwned::new_from_vec(&pub_key_decoded) {
-        Ok(pub_encro) => {
-            /*println_message(
-                1,
-                format!(
-                    "-- Initialization attempt with {} {}",
-                    pub_encro.get_public_key_fingerprint(),
-                    pub_encro.get_userid()
-                ),
-            )
-            .await;
-            println_message(
-                1,
-                format!("The peer wants to chat, do you want to chat with this peer? [y/n]"),
-            )
-            .await;
-
-            let response = InputCommand::read_yes_or_no(1, ">> ").await;
-            if response.is_err() {
-                println_message(
-                    1,
-                    format!("-- Failed to read input.. Not initializing chat"),
-                )
-                .await;
-                return false;
-            } else {
-                let go_further = response.unwrap();
-                if go_further {
-                    println_message(
-                        1,
-                        format!(
-                            "-- Initializing chat with {} ({})",
-                            pub_encro.get_userid(),
-                            pub_encro.get_public_key_fingerprint()
-                        ),
-                    )
-                    .await;
-                    return true;
-                } else {
-                    println_message(
-                        1,
-                        format!(
-                            "-- Chat not initialized with {} ({})",
-                            pub_encro.get_userid(),
-                            pub_encro.get_public_key_fingerprint()
-                        ),
-                    )
-                    .await;
-                }
-            }
-            false*/
-            true
-        }
+        Ok(pub_encro) => true,
         _ => {
-            &format!("-- Chat was not initiailized");
+            let _ = &format!("-- Chat was not initiailized");
             false
         }
     }
@@ -362,7 +407,7 @@ async fn terminate(session_tx: mpsc::Sender<(String, String)>) {
     pipe1.send(WindowCommand::Shutdown()).await;
 
     tokio::time::sleep(Duration::from_millis(200)).await;
-    session_tx
+    let _ = session_tx
         .send((topic.to_string(), msg.serialize().unwrap()))
         .await;
 }
@@ -376,46 +421,104 @@ async fn terminal_program(
     for uid in cert.userids() {
         userid.push_str(&uid.userid().to_string());
     }
-    println_message(
-        1,
-        format!("-- Using key {} {}", &cert.fingerprint(), userid),
-    )
-    .await;
+    let mut upper_prompt = format!("-- Using key {} {}", &cert.fingerprint(), userid);
+    upper_prompt.push_str("\n");
+    upper_prompt.push_str(&InputCommand::get_small_help());
     // Serve incoming commands
     InputCommand::print_small_help().await;
     let mut keep_running = true;
     let mut print_prompt = true;
     while keep_running {
-        if print_prompt {
-            print_message_str(1, ">> ").await;
-        }
         let pending = session.get_pending_request().await;
         if pending.is_some() {
-            println_message_str(1, "There is an initialization request sent").await;
-            let r = InputCommand::read_yes_or_no(1, ">> ");
+            let pending = pending.unwrap();
+            let session_data = pending;
+            let pub_key = session_data.pub_key.clone();
+            let session_id = session_data.id.clone();
+            let pub_key_decoded = match base64::decode(pub_key) {
+                Err(_) => Err(()),
+                Ok(pub_key) => Ok(pub_key),
+            };
+            if pub_key_decoded.is_ok() {
+                let pub_key_decoded = pub_key_decoded.unwrap();
+                match PGPEnCryptOwned::new_from_vec(&pub_key_decoded) {
+                    Ok(pub_encro) => {
+                        println_message_str(
+                            1,
+                            &format!(
+                                "-- There is a chat initialization request sent from {} ({})",
+                                pub_encro.get_userid(),
+                                pub_encro.get_public_key_fingerprint()
+                            ),
+                        )
+                        .await;
+                        println_message_str(1, "-- Do you want to chat with this peer? [y/n]")
+                            .await;
+                        let r = InputCommand::read_yes_or_no(1, ">> ").await;
+                        if r.is_ok() && r.unwrap() {
+                            let _ = session.accept_pending_request(&session_id).await;
+                            println_message_str(1, "-- Accepted this chat request.").await;
+
+                            println_message_str(
+                                1,
+                                &format!(
+                                    "-- You can now chat with {} ({})",
+                                    pub_encro.get_userid(),
+                                    pub_encro.get_public_key_fingerprint()
+                                ),
+                            )
+                            .await;
+                            print_prompt = true;
+                        } else {
+                            println_message_str(1, "-- Declined this chat request.").await;
+                            let _ = session.decline_pending_request(&session_id).await;
+                        }
+                    }
+                    _ => {}
+                }
+            }
         } else {
-            let input = read_message(1, "").await;
+            let mut input;
+            if print_prompt {
+                input = read_message(1, ">> ", &upper_prompt, 1).await;
+            } else {
+                input = read_message(1, "", &upper_prompt, 1).await;
+            }
             if input.is_ok() {
-                let cmd = InputCommand::parse_from(&input.unwrap());
+                let input = input.unwrap();
+                if input.len() > 0 {
+                    print_prompt = true;
+                } else {
+                    print_prompt = false;
+                }
+                let cmd = InputCommand::parse_from(&input);
                 match cmd {
                     Some(InputCommand::List(_)) => {
                         // List all discovered peers
                         let discovered = session.get_discovered().await;
                         let mut i = 1;
-                        for peer in discovered {
-                            let peer_decoded = base64::decode(&peer).unwrap();
-                            let peer_cert = read_from_vec(&peer_decoded).unwrap();
-                            let peer_fingerprint = peer_cert.fingerprint();
-                            let mut peer_userid = "".to_string();
-                            for uid in peer_cert.userids() {
-                                peer_userid.push_str(&uid.userid().to_string());
-                            }
-                            println_message(
+                        if discovered.len() == 0 {
+                            println_message_str(
                                 1,
-                                format!("-- {}: {} {}", i, peer_userid, peer_fingerprint),
+                                "-- Did not discover any other peers out there ¯\\_(´_´)_/¯...",
                             )
                             .await;
-                            i += 1;
+                        } else {
+                            for peer in discovered {
+                                let peer_decoded = base64::decode(&peer).unwrap();
+                                let peer_cert = read_from_vec(&peer_decoded).unwrap();
+                                let peer_fingerprint = peer_cert.fingerprint();
+                                let mut peer_userid = "".to_string();
+                                for uid in peer_cert.userids() {
+                                    peer_userid.push_str(&uid.userid().to_string());
+                                }
+                                println_message(
+                                    1,
+                                    format!("-- {}: {} {}", i, peer_userid, peer_fingerprint),
+                                )
+                                .await;
+                                i += 1;
+                            }
                         }
                     }
                     Some(InputCommand::Initialize(cmd)) => {
@@ -459,11 +562,7 @@ async fn terminal_program(
                                         .initialize_session_zenoh(peer.clone())
                                         .await
                                     {
-                                        Ok(ok) => {
-                                            println!(
-                                                "-- Successfully established a session connection"
-                                            );
-                                        }
+                                        Ok(ok) => {}
                                         Err(not_ok) => {
                                             println!("{}", not_ok);
                                             println!("error: Failed to initiailize a session.");
@@ -491,7 +590,12 @@ async fn terminal_program(
                         // Print help
                         InputCommand::print_help().await;
                     }
-                    None => {}
+                    None => {
+                        // Send this input to listeners
+                        if input.len() > 0 && session.get_number_of_sessions().await > 0 {
+                            send_chat_message(1, input).await;
+                        }
+                    }
                 }
             } else {
             }
@@ -545,7 +649,7 @@ async fn launch_terminal_program(
     }
 
     // Initialize
-    println!("Initializing ");
+    println!("Initializing {}", cert.fingerprint());
     pipe0.send(WindowCommand::Init()).await;
 
     tokio::time::sleep(Duration::from_millis(400)).await;
@@ -682,12 +786,18 @@ async fn main() {
     let callback_chat = move |arg1: String, arg2: String| {
         Box::pin(cb_chat(arg1, arg2)) as Pin<Box<dyn Future<Output = ()> + Send>>
     };
-    let callback_initialized = move |arg1: String| {
-        Box::pin(cb_initialized(arg1)) as Pin<Box<dyn Future<Output = bool> + Send>>
+    let callback_init_incoming = move |arg1: String| {
+        Box::pin(cb_init_incoming(arg1)) as Pin<Box<dyn Future<Output = bool> + Send>>
+    };
+    let callback_init_await = move |arg1: String| {
+        Box::pin(cb_init_await(arg1)) as Pin<Box<dyn Future<Output = ()> + Send>>
+    };
+    let callback_init_accepted = move |arg1: String| {
+        Box::pin(cb_init_accepted(arg1)) as Pin<Box<dyn Future<Output = ()> + Send>>
     };
     let callback_chat_input = move |arg1: String, arg2: String, arg3: String| {
         Box::pin(cb_chat_input(arg1, arg2, arg3))
-            as Pin<Box<dyn Future<Output = (String, String)> + Send>>
+            as Pin<Box<dyn Future<Output = Option<(String, String)>> + Send>>
     };
     let callback_terminate =
         move || Box::pin(cb_terminate()) as Pin<Box<dyn Future<Output = ()> + Send>>;
@@ -697,7 +807,13 @@ async fn main() {
         .register_callback_chat(Box::new(callback_chat))
         .await;
     session
-        .register_callback_initialized(Box::new(callback_initialized))
+        .register_callback_init_incoming(Box::new(callback_init_incoming))
+        .await;
+    session
+        .register_callback_init_await(Box::new(callback_init_await))
+        .await;
+    session
+        .register_callback_init_accepted(Box::new(callback_init_accepted))
         .await;
     session
         .register_callback_discovered(Box::new(callback_discovered))
@@ -709,151 +825,16 @@ async fn main() {
         .register_callback_terminate(Box::new(callback_terminate))
         .await;
 
-    let mut i = 0;
-
     let tx = session.get_tx().await;
     tokio::spawn(async move {
         let c = tokio::signal::ctrl_c().await;
         if c.is_ok() {
             terminate(tx).await;
+            println!("terminate called");
         }
     });
 
     launch_terminal_program(cert.clone(), session.get_tx().await, session.clone()).await;
-
-    /*
-    if !no_discovery {
-        WINDOW_MANAGER.printw(1, "-- Discovering other peers out there...");
-        session.discover().await;
-
-        let mut session_discover = session.clone();
-        session_discover.set_tx_chat(session.get_tx().await);
-        tokio::spawn(async move {
-            let mut session = session_discover;
-            let mut continue_search = true;
-            let mut keep_running = true;
-            unsafe {
-                keep_running = *KEEP_RUNNING;
-            }
-            let mut peers = Vec::new();
-            while continue_search && keep_running {
-                session.discover().await;
-
-                WINDOW_MANAGER.printw(1, "-- Awaiting responses...");
-                // sleep for some time
-                tokio::time::sleep(Duration::from_secs(5)).await;
-
-                peers = session.get_discovered().await;
-                if peers.len() == 0 {
-                    WINDOW_MANAGER.printw(
-                        1,
-                        "-- Did not discover any other peers out there ¯\\_(´_´)_/¯...",
-                    );
-                    WINDOW_MANAGER.printw(1, &format!("-- Do you want to search again? [y/n]"));
-
-                    let input = WINDOW_MANAGER.getch(1, ">> ");
-                    if input.to_lowercase().starts_with('y') {
-                        continue_search = true;
-                    } else {
-                        continue_search = false;
-                    }
-                } else {
-                    continue_search = false;
-                }
-            }
-            if peers.len() > 0 {
-                WINDOW_MANAGER.printw(1, &format!("-- Discovered {} peers", peers.len()));
-                let mut i = 1;
-                for peer in &peers {
-                    let peer_decoded = base64::decode(&peer).unwrap();
-                    let peer_cert = read_from_vec(&peer_decoded).unwrap();
-                    let peer_fingerprint = peer_cert.fingerprint();
-                    let mut peer_userid = "".to_string();
-                    for uid in peer_cert.userids() {
-                        peer_userid.push_str(&uid.userid().to_string());
-                    }
-
-                    WINDOW_MANAGER.printw(
-                        1,
-                        &format!("-- {}: {} {}", i, peer_userid, peer_fingerprint),
-                    );
-                    i += 1;
-                }
-
-                let mut keep_going = true;
-                let mut keep_running = true;
-                while keep_running && keep_going {
-                    unsafe {
-                        keep_running = *KEEP_RUNNING;
-                    }
-                    WINDOW_MANAGER.printw(
-                        1,
-                        &format!(
-                            "Which peer do you want to connect to [{}]?",
-                            if peers.len() == 1 {
-                                format!("1")
-                            } else {
-                                format!("1-{}", peers.len())
-                            }
-                        ),
-                    );
-                    let p = WINDOW_MANAGER.getch(1, ">> ");
-                    if p.to_lowercase().starts_with('y') {
-                        let p = 1;
-                        let peer = peers[p - 1].clone();
-                        let peer_decoded = base64::decode(&peer).unwrap();
-                        let peer_cert = read_from_vec(&peer_decoded).unwrap();
-                        let peer_fingerprint = peer_cert.fingerprint();
-                        let mut peer_userid = "".to_string();
-                        for uid in peer_cert.userids() {
-                            peer_userid.push_str(&uid.userid().to_string());
-                        }
-                        WINDOW_MANAGER.printw(
-                            1,
-                            &format!(
-                                "-- Sending a session initialization request to {} {} ...",
-                                peer_userid, peer_fingerprint
-                            ),
-                        );
-                        let session_id = session.initialize_session_zenoh(peer).await.unwrap();
-                        keep_going = false;
-                    }
-                    match p.parse::<usize>() {
-                        Ok(p) => {
-                            if p > 0 && p <= peers.len() {
-                                let peer = peers[p - 1].clone();
-                                let peer_decoded = base64::decode(&peer).unwrap();
-                                let peer_cert = read_from_vec(&peer_decoded).unwrap();
-                                let peer_fingerprint = peer_cert.fingerprint();
-                                let mut peer_userid = "".to_string();
-                                for uid in peer_cert.userids() {
-                                    peer_userid.push_str(&uid.userid().to_string());
-                                }
-                                WINDOW_MANAGER.printw(
-                                    1,
-                                    &format!(
-                                        "-- Sending a session initialization request to {} {} ...",
-                                        peer_userid, peer_fingerprint
-                                    ),
-                                );
-                                let session_id =
-                                    session.initialize_session_zenoh(peer).await.unwrap();
-                                keep_going = false;
-                            } else {
-                                WINDOW_MANAGER.printw(1, "-- Invalid input");
-                                keep_going = true;
-                            }
-                        }
-                        Err(_) => {
-                            WINDOW_MANAGER.printw(1, "-- Invalid input");
-                            keep_going = true;
-                        }
-                    }
-                }
-            }
-        });
-    }
-    WINDOW_MANAGER.printw(1, &format!("-- Awaiting other peers to connect to us..."));*/
 
     tokio::time::sleep(Duration::from_millis(400)).await;
     session.serve().await;

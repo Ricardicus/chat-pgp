@@ -1,71 +1,81 @@
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum EncryptionType {
     Assymetric,
     Symmetric,
 }
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct InitMsg {
     pub pub_key: String,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct InitOkMsg {
-    pub sym_key: String,
+    pub sym_key_encrypted: String,
+    pub pub_key: String,
     pub orig_pub_key: String,
 }
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct InitAwaitMsg {
-    pub sym_key: String,
+    pub pub_key: String,
     pub orig_pub_key: String,
 }
-
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InitDeclineMsg {
+    pub pub_key: String,
+    pub orig_pub_key: String,
+}
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct KeyPassMsg {
     pub sym_key: String,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct CloseMsg {
     pub data: String,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ChatMsg {
     pub message: String,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct CloseOkMsg {
     pub data: String,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct PingMsg {}
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct PongMsg {}
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct EncryptedMsg {
     pub data: String,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct DiscoveryMsg {
     pub pub_key: String,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct DiscoveryReplyMsg {
+    pub pub_key: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct InternalMsg {
     pub message: String,
     pub topic: String,
 }
 
 #[repr(u32)]
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum SessionErrorCodes {
     Serialization = 1,
     InvalidMessage = 2,
@@ -76,18 +86,19 @@ pub enum SessionErrorCodes {
     NotAccepted = 7,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SessionErrorMsg {
     pub code: u32,
     pub message: String,
 }
 
 // Define an enum to encapsulate different message data types
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum MessageData {
     Init(InitMsg),
     InitOk(InitOkMsg),
     InitAwait(InitAwaitMsg),
+    InitDecline(InitDeclineMsg),
     Close(CloseMsg),
     CloseOk(CloseOkMsg),
     Chat(ChatMsg),
@@ -97,6 +108,7 @@ pub enum MessageData {
     SessionError(SessionErrorMsg),
     KeyPass(KeyPassMsg),
     Discovery(DiscoveryMsg),
+    DiscoveryReply(DiscoveryReplyMsg),
     Internal(InternalMsg),
 }
 
@@ -117,7 +129,7 @@ pub enum MessagingError {
     Receiving,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SessionMessage {
     pub message: MessageData,
     pub session_id: String,
@@ -178,25 +190,34 @@ impl SessionMessage {
         }
     }
 
-    pub fn new_init_ok(sym_key: String, orig_pub_key: String) -> Self {
+    pub fn new_init_ok(sym_key_encrypted: String, pub_key: String, orig_pub_key: String) -> Self {
         SessionMessage {
             message: MessageData::InitOk(InitOkMsg {
-                sym_key,
+                sym_key_encrypted,
+                pub_key,
                 orig_pub_key,
             }),
             session_id: "".to_string(),
         }
     }
-    pub fn new_init_await(sym_key: String, orig_pub_key: String) -> Self {
+    pub fn new_init_await(orig_pub_key: String, pub_key: String) -> Self {
         SessionMessage {
             message: MessageData::InitAwait(InitAwaitMsg {
-                sym_key,
                 orig_pub_key,
+                pub_key,
             }),
             session_id: "".to_string(),
         }
     }
-
+    pub fn new_init_decline(orig_pub_key: String, pub_key: String) -> Self {
+        SessionMessage {
+            message: MessageData::InitDecline(InitDeclineMsg {
+                orig_pub_key,
+                pub_key,
+            }),
+            session_id: "".to_string(),
+        }
+    }
     pub fn new_chat(message: String) -> Self {
         SessionMessage {
             message: MessageData::Chat(ChatMsg { message: message }),
@@ -207,6 +228,13 @@ impl SessionMessage {
     pub fn new_discovery(pub_key: String) -> Self {
         SessionMessage {
             message: MessageData::Discovery(DiscoveryMsg { pub_key }),
+            session_id: "".to_string(),
+        }
+    }
+
+    pub fn new_discovery_reply(pub_key: String) -> Self {
+        SessionMessage {
+            message: MessageData::DiscoveryReply(DiscoveryReplyMsg { pub_key }),
             session_id: "".to_string(),
         }
     }
@@ -244,7 +272,7 @@ impl SessionMessage {
     pub fn to_string(&self) -> String {
         match &self.message {
             MessageData::Init(msg) => msg.pub_key.clone(),
-            MessageData::InitOk(msg) => msg.sym_key.clone(),
+            MessageData::InitOk(msg) => msg.sym_key_encrypted.clone(),
             MessageData::Close(msg) => msg.data.clone(),
             MessageData::Chat(msg) => msg.message.clone(),
             MessageData::Encrypted(msg) => msg.data.clone(),

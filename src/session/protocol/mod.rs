@@ -4,6 +4,7 @@ pub enum Topic {
     Initialize,
     Discover,
     Message,
+    Errors,
     Internal,
 }
 
@@ -14,6 +15,7 @@ impl Topic {
             Topic::Initialize => "session/initialize",
             Topic::Discover => "session/discover",
             Topic::Message => "session/message",
+            Topic::Errors => "errors",
             Topic::Internal => "internal",
         }
     }

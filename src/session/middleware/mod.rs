@@ -113,7 +113,6 @@ impl MessagebleTopicAsync for ZenohHandler {
                 return match SessionMessage::deserialize(&incoming) {
                     Ok(message) => Ok(message),
                     Err(_) => {
-                        println!("Failed to deserialize incoming: {}", incoming);
                         return Err(MessagingError::Serialization);
                     }
                 };
@@ -159,7 +158,6 @@ impl MessagebleTopicAsyncPublishReads for ZenohHandler {
                     match SessionMessage::deserialize(&incoming) {
                         Ok(message) => Ok(message),
                         Err(_) => {
-                            println!("Failed to deserialize incoming: {}", incoming);
                             return Err(MessagingError::Serialization);
                         }
                     }
