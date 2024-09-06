@@ -227,6 +227,16 @@ impl InputCommand {
     }
 }
 
+fn short_fingerprint(fingerprint: &str) -> String {
+    if fingerprint.len() > 8 {
+        let first_four = &fingerprint[0..4];
+        let last_four = &fingerprint[fingerprint.len() - 4..];
+        format!("{}...{}", first_four, last_four)
+    } else {
+        fingerprint.to_string()
+    }
+}
+
 async fn cb_chat(public_key: String, message: String) {
     let pub_key_decoded = match base64::decode(public_key) {
         Err(_) => {
@@ -240,8 +250,8 @@ async fn cb_chat(public_key: String, message: String) {
                 0,
                 format!(
                     "{} ({}): {}",
-                    pub_encro.get_public_key_fingerprint(),
                     pub_encro.get_userid(),
+                    short_fingerprint(&pub_encro.get_public_key_fingerprint()),
                     message
                 ),
             )
@@ -669,7 +679,6 @@ async fn launch_terminal_program(
         // Wait for the window manager loops to be set up
         tokio::time::sleep(Duration::from_millis(400)).await;
         terminal_program(session_tx, cert, session).await;
-        println!("terminal program returning");
     });
 }
 
@@ -716,39 +725,41 @@ async fn main() {
 
     if test_receiver {
         println!("-- Testing initiailize session [receiver]");
-        session.serve_testing().await;
-        exit(0);
+        let mut session_clone = session.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(1000)).await;
+            let mut running = session_clone.get_running();
+            let mut running = running.lock().await;
+            *running = false;
+        });
+
+        session.serve().await;
+        let discovered = session.get_discovered().await;
+        println!("discovered: {}", discovered.len());
+        if discovered.len() > 0 {
+            exit(0);
+        }
+        exit(1);
     }
 
     if test_sender {
         println!("-- Testing initiailize session [sender]");
-        /*
-                let mut pub_key = None;
-                let discovered_pub_keys = session.discover().await;
-                if discovered_pub_keys.len() > 0 {
-                    pub_key = Some(discovered_pub_keys[0].clone());
-                }
 
-                let pub_key: String = pub_key.expect("Failed to discover nodes out there.. exiting..");
-                let pub_key_dec = base64::decode(&pub_key).expect("Failed to decode pub_key");
-                let discovered_cert =
-                    read_from_vec(&pub_key_dec).expect("Got invalid certificate from discovery");
-                let discovered_pub_key_fingerprint = discovered_cert.fingerprint().to_string();
+        let mut session_clone = session.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(1000)).await;
+            let mut running = session_clone.get_running();
+            let mut running = running.lock().await;
+            *running = false;
+        });
 
-                println!("Discovered pub_key: {}", &discovered_pub_key_fingerprint);
-                let session_id = match session.initialize_session_zenoh(pub_key.clone()).await {
-
-                    Ok(ok) => {
-                        println!("-- Successfully established a session connection");
-                        exit(0);
-                    }
-                    Err(not_ok) => {
-                        println!("{}", not_ok);
-                        println!("error: Failed to initiailize a session.");
-                        exit(1);
-                    }
-                };
-        */
+        session.serve().await;
+        let discovered = session.get_discovered().await;
+        println!("discovered: {}", discovered.len());
+        if discovered.len() > 0 {
+            exit(0);
+        }
+        exit(1);
     }
 
     // Wrap the async functions into a closure that matches the signature

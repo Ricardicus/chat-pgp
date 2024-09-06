@@ -1,15 +1,11 @@
 use std::collections::HashMap;
+use std::pin::Pin;
 use std::process::exit;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 use std::time::SystemTime;
 use tokio::sync::{mpsc, Mutex};
-use tokio::time::timeout;
-
-use std::env;
-use std::io::{self, Write};
-use std::pin::Pin;
 
 pub mod crypto;
 pub mod messages;
@@ -182,6 +178,10 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
             middleware_config: self.middleware_config.clone(),
             running: self.running.clone(),
         }
+    }
+
+    pub fn get_running(&self) -> Arc<Mutex<bool>> {
+        self.running.clone()
     }
 
     pub fn set_tx_chat(&mut self, tx: mpsc::Sender<(String, String)>) {

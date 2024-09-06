@@ -202,7 +202,7 @@ impl WindowManager {
             wtimeout(*subwin, wait_time_seconds * 1000);
             wrefresh(*subwin);
 
-            nocbreak();
+            cbreak();
             echo();
             curs_set(CURSOR_VISIBILITY::CURSOR_VISIBLE);
 
@@ -239,7 +239,9 @@ impl WindowManager {
             while ch != '\n' as i32 && self.keep_running {
                 if ch == ERR {
                     wmove(*subwin, cur_y, cur_x);
-                    return None;
+                    if input.len() == 0 {
+                        return None;
+                    }
                 } else if ch == KEY_BACKSPACE || ch == 127 {
                     if !input.is_empty() {
                         input.pop();
@@ -249,11 +251,8 @@ impl WindowManager {
                     input.push(ch as u8);
                 }
                 wrefresh(*subwin);
+                getyx(*subwin, &mut cur_y, &mut cur_x);
                 ch = wgetch(*subwin);
-            }
-            if ch as i32 == 10 && input.len() == 0 {
-                wmove(*subwin, cur_y, cur_x);
-                return None;
             }
 
             let utf8 = std::str::from_utf8(input.as_slice());
@@ -261,7 +260,18 @@ impl WindowManager {
                 return None;
             } else {
                 // Exit condition (optional)
-                return Some(utf8.unwrap().to_string().trim().to_string());
+                let s = utf8.unwrap().to_string().trim().to_string();
+                let cur_y = getcury(*subwin);
+                wmove(*subwin, cur_y + 1, 0);
+                let cur_y = getcury(*subwin);
+                if cur_y >= getmaxy(*subwin) - 2 {
+                    // Manually scroll the subwindow if the cursor is at the bottom
+                    let diff = getmaxy(*subwin) - (cur_y);
+                    wscrl(*subwin, diff);
+                    wmove(*subwin, getmaxy(*subwin) - diff, 0); // Move cursor to the start of the new line after scroll
+                }
+
+                return Some(s);
             }
         } else {
             None
