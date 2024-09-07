@@ -1,4 +1,4 @@
-# PGP Chat
+# Chat-PGP
 
 Welcome to PGP chat. This in a encrypted chat platform based on [PGP](https://en.wikipedia.org/wiki/Pretty_Good_Privacy).
 
