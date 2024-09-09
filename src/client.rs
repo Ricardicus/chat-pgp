@@ -6,10 +6,12 @@ use serde::{Deserialize, Serialize};
 use session::crypto::{
     ChaCha20Poly1305EnDeCrypt, Cryptical, CrypticalID, PGPEnCryptOwned, PGPEnDeCrypt,
 };
-use session::messages::SessionMessage;
+use session::messages::{MessagingError, SessionMessage};
 use session::protocol::*;
 use session::Session;
+use std::fs;
 use std::future::Future;
+use std::io;
 use std::pin::Pin;
 use std::process::exit;
 use std::sync::Arc;
@@ -19,7 +21,9 @@ use tokio::sync::mpsc;
 mod util;
 
 mod pgp;
-use pgp::pgp::{generate_new_key, get_public_key_as_base64, read_from_gpg, read_from_vec};
+use pgp::pgp::{
+    generate_new_key, get_public_key_as_base64, read_from_gpg, read_from_vec, test_sign_verify,
+};
 
 extern crate sequoia_openpgp as openpgp;
 use openpgp::cert::prelude::*;
@@ -313,7 +317,7 @@ async fn cb_terminate() {
     println_message(1, format!("-- Terminating session ...")).await;
 }
 
-async fn cb_init_declined(public_key: String) {
+async fn cb_init_declined(public_key: String, message: String) {
     let pub_key_decoded = match base64::decode(public_key) {
         Err(_) => {
             return;
@@ -558,6 +562,7 @@ async fn terminal_program(
                                     {
                                         Ok(ok) => {}
                                         Err(not_ok) => {
+                                            terminate(session_tx.clone()).await;
                                             println!("{}", not_ok);
                                             println!("error: Failed to initiailize a session.");
                                         }
@@ -634,12 +639,7 @@ async fn launch_terminal_program(
     }
 
     // Initialize
-    println!(
-        "Initializing chat-pgp with fingerprint {}",
-        cert.fingerprint()
-    );
     pipe0.send(WindowCommand::Init()).await;
-
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let pgp_handler = PGPEnDeCrypt::new_no_certpass(cert.clone());
@@ -724,18 +724,14 @@ async fn main() {
     let mut session = Session::new(pgp_handler, zenoh_config.clone());
 
     if test_receiver {
-        println!("-- Testing initiailize session [receiver]");
+        session.set_discovery_interval_seconds(1);
         let mut session_clone = session.clone();
         tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(1000)).await;
-            let mut running = session_clone.get_running();
-            let mut running = running.lock().await;
-            *running = false;
+            tokio::time::sleep(Duration::from_millis(3000)).await;
+            session_clone.stop_session().await;
         });
-
         session.serve().await;
         let discovered = session.get_discovered().await;
-        println!("discovered: {}", discovered.len());
         if discovered.len() > 0 {
             exit(0);
         }
@@ -743,19 +739,16 @@ async fn main() {
     }
 
     if test_sender {
-        println!("-- Testing initiailize session [sender]");
+        session.set_discovery_interval_seconds(1);
 
         let mut session_clone = session.clone();
         tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(1000)).await;
-            let mut running = session_clone.get_running();
-            let mut running = running.lock().await;
-            *running = false;
+            tokio::time::sleep(Duration::from_millis(3000)).await;
+            session_clone.stop_session().await;
         });
 
         session.serve().await;
         let discovered = session.get_discovered().await;
-        println!("discovered: {}", discovered.len());
         if discovered.len() > 0 {
             exit(0);
         }
@@ -778,6 +771,9 @@ async fn main() {
     let callback_init_accepted = move |arg1: String| {
         Box::pin(cb_init_accepted(arg1)) as Pin<Box<dyn Future<Output = ()> + Send>>
     };
+    let callback_init_declined = move |arg1: String, arg2: String| {
+        Box::pin(cb_init_declined(arg1, arg2)) as Pin<Box<dyn Future<Output = ()> + Send>>
+    };
     let callback_chat_input = move |arg1: String, arg2: String, arg3: String| {
         Box::pin(cb_chat_input(arg1, arg2, arg3))
             as Pin<Box<dyn Future<Output = Option<(String, String)>> + Send>>
@@ -799,6 +795,9 @@ async fn main() {
         .register_callback_init_accepted(Box::new(callback_init_accepted))
         .await;
     session
+        .register_callback_init_declined(Box::new(callback_init_declined))
+        .await;
+    session
         .register_callback_discovered(Box::new(callback_discovered))
         .await;
     session
@@ -809,15 +808,32 @@ async fn main() {
         .await;
 
     let tx = session.get_tx().await;
+    let tx_clone = tx.clone();
     tokio::spawn(async move {
         let c = tokio::signal::ctrl_c().await;
         if c.is_ok() {
-            terminate(tx).await;
+            terminate(tx_clone).await;
         }
     });
 
     launch_terminal_program(cert.clone(), session.get_tx().await, session.clone()).await;
 
     tokio::time::sleep(Duration::from_millis(400)).await;
-    session.serve().await;
+    match session.serve().await {
+        Ok(_) => {}
+        Err(e) => match e {
+            MessagingError::ZenohError => {
+                terminate(tx).await;
+                println!("Something went wrong with the communication protocol. Check the configuration from Zenoh.");
+                println!("Review your Zenoh configuration file '{}':", zenoh_config);
+                let contents = fs::read_to_string(zenoh_config)
+                    .expect("Something went wrong reading the file");
+                println!("{}", contents);
+                println!(
+                    "Are you perhaps offline, or trying to reach a non-existing Zenoh router?"
+                );
+            }
+            _ => {}
+        },
+    }
 }

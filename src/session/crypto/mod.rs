@@ -23,6 +23,13 @@ pub trait CrypticalEncrypt {
 pub trait CrypticalDecrypt {
     fn decrypt(&self, input: &str) -> Result<String, String>;
 }
+pub trait CrypticalSign {
+    fn sign(&self, input: &str) -> Result<String, String>;
+}
+pub trait CrypticalVerify {
+    fn verify(&self, input: &str, signature: &str) -> Result<bool, String>;
+}
+
 pub trait CrypticalID {
     fn get_userid(&self) -> String;
 }
@@ -241,6 +248,50 @@ impl Cryptical for PGPEnCryptOwned {
     }
     fn get_public_key_fingerprint(&self) -> String {
         self.cert.fingerprint().to_string()
+    }
+}
+
+impl CrypticalSign for PGPEnDeCrypt {
+    fn sign(&self, input: &str) -> Result<String, String> {
+        // Implement your signing logic here
+        let mut sink = Vec::new();
+        match pgp::sign(&mut sink, input, &self.cert.clone(), &self.cert_passphrase) {
+            Ok(_) => {
+                let s = base64::encode(sink);
+                Ok(s)
+            }
+            Err(_msg) => Err(String::from("Failed to sign")),
+        }
+    }
+}
+
+impl CrypticalVerify for PGPEnDeCrypt {
+    fn verify(&self, signature: &str, content: &str) -> Result<bool, String> {
+        // Implement your verification logic here
+        let signature_base64decoded = match base64::decode(signature) {
+            Ok(res) => res,
+            Err(_) => return Err(String::from("Invalid base64 input")),
+        };
+        match pgp::verify(&signature_base64decoded, &content, &self.cert.clone()) {
+            Ok(()) => Ok(true),
+            Err(_msg) => Err(String::from("Failed to verify")),
+        }
+    }
+}
+
+impl CrypticalVerify for PGPEnCryptOwned {
+    fn verify(&self, signature: &str, content: &str) -> Result<bool, String> {
+        // Implement your verification logic here
+        let signature_base64decoded = match base64::decode(signature) {
+            Ok(res) => res,
+            Err(_) => {
+                return Err(String::from("Invalid base64 input"));
+            }
+        };
+        match pgp::verify(&signature_base64decoded, &content, &self.cert.clone()) {
+            Ok(()) => Ok(true),
+            Err(_msg) => Err(String::from("Failed to verify")),
+        }
     }
 }
 

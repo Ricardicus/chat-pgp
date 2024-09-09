@@ -189,6 +189,14 @@ impl WindowManager {
             );
         }
     }
+    // Print a message to a specific window
+    pub fn clrtoeol(&self, window_number: usize) {
+        if let Some((_win, subwin)) = self.windows.get(&window_number) {
+            wclrtoeol(*subwin);
+        } else {
+            println!("Window number {} does not exist. ", window_number);
+        }
+    }
 
     // Make window interactive
     pub fn getch(
@@ -245,7 +253,9 @@ impl WindowManager {
                 } else if ch == KEY_BACKSPACE || ch == 127 {
                     if !input.is_empty() {
                         input.pop();
-                        wdelch(*subwin);
+                        wmove(*subwin, cur_y, cur_x - 1);
+                        self.clrtoeol(window_number);
+                        clrtoeol();
                     }
                 } else {
                     input.push(ch as u8);

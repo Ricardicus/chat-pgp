@@ -9,6 +9,7 @@ pub enum EncryptionType {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct InitMsg {
     pub pub_key: String,
+    pub signature: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -25,7 +26,7 @@ pub struct InitAwaitMsg {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct InitDeclineMsg {
     pub pub_key: String,
-    pub orig_pub_key: String,
+    pub message: String,
 }
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct KeyPassMsg {
@@ -84,6 +85,7 @@ pub enum SessionErrorCodes {
     Timeout = 5,
     Protocol = 6,
     NotAccepted = 7,
+    InvalidSignature = 8,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -127,6 +129,7 @@ pub enum MessagingError {
     Encryption,
     InvalidSession,
     Receiving,
+    ZenohError,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -183,9 +186,9 @@ pub trait MessagebleTopicAsyncPublishReads {
 }
 
 impl SessionMessage {
-    pub fn new_init(pub_key: String) -> Self {
+    pub fn new_init(pub_key: String, signature: String) -> Self {
         SessionMessage {
-            message: MessageData::Init(InitMsg { pub_key }),
+            message: MessageData::Init(InitMsg { pub_key, signature }),
             session_id: "".to_string(),
         }
     }
@@ -209,12 +212,9 @@ impl SessionMessage {
             session_id: "".to_string(),
         }
     }
-    pub fn new_init_decline(orig_pub_key: String, pub_key: String) -> Self {
+    pub fn new_init_decline(pub_key: String, message: String) -> Self {
         SessionMessage {
-            message: MessageData::InitDecline(InitDeclineMsg {
-                orig_pub_key,
-                pub_key,
-            }),
+            message: MessageData::InitDecline(InitDeclineMsg { pub_key, message }),
             session_id: "".to_string(),
         }
     }

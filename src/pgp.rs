@@ -37,7 +37,7 @@ pub mod pgp {
     }
 
     pub fn generate_new_key() -> Result<openpgp::Cert, String> {
-        let res = CertBuilder::general_purpose(None, Some("the@example.org"))
+        let res = CertBuilder::general_purpose(None, Some("chatpgp@example.org"))
             .set_cipher_suite(CipherSuite::RSA2k)
             .generate();
         if res.is_err() {
@@ -70,18 +70,77 @@ pub mod pgp {
         }
     }
 
+    pub fn test_sign_verify(cert: &openpgp::Cert) -> bool {
+        let mut v = Vec::new();
+        let text = "hello".to_string();
+        let passphrase = "1234512345".to_string();
+
+        sign(&mut v, &text, cert, &passphrase);
+
+        //let val = v;// base64::encode(v);
+
+        //let val = val; //base64::decode(val).unwrap();
+        let val = v;
+        match verify(&val, &text, &cert) {
+            Ok(_) => true,
+            Err(_) => false,
+        }
+    }
+
     pub fn sign(
         sink: &mut (dyn Write + Send + Sync),
         plaintext: &str,
         tsk: &openpgp::Cert,
         passphrase: &str,
     ) -> openpgp::Result<()> {
-        let _p = &P::new();
+        let p = &P::new();
         // Get the keypair to do the signing from the Cert.
-        let p: Password = String::from(passphrase).into();
-
         let key = tsk.primary_key().key().clone().parts_into_secret()?;
-        let keypair = key.decrypt_secret(&p)?.into_keypair()?;
+        let mut keypair = None;
+        if passphrase.len() == 0 {
+            keypair = Some(
+                tsk.keys()
+                    .unencrypted_secret()
+                    .with_policy(p, None)
+                    .supported()
+                    .alive()
+                    .revoked(false)
+                    .for_signing()
+                    .next()
+                    .unwrap()
+                    .key()
+                    .clone()
+                    .into_keypair()?,
+            );
+        } else {
+            let passphrase: Password = String::from(passphrase).into();
+            for key in tsk.keys() {
+                match key
+                    .key()
+                    .clone()
+                    .parts_into_secret()
+                    .unwrap()
+                    .decrypt_secret(&passphrase)
+                {
+                    Ok(k) => {
+                        keypair = Some(k.into_keypair().unwrap());
+                        break;
+                    }
+                    Err(_) => {
+                        keypair = Some(
+                            key.key()
+                                .clone()
+                                .parts_into_secret()
+                                .unwrap()
+                                .into_keypair()
+                                .unwrap(),
+                        );
+                    }
+                }
+            }
+        }
+
+        let keypair = keypair.unwrap();
 
         // Start streaming an OpenPGP message.
         let message = Message::new(sink);
@@ -93,7 +152,7 @@ pub mod pgp {
         let mut message = LiteralWriter::new(message).build()?;
 
         // Sign the data.
-        message.write_all(plaintext.as_bytes())?;
+        message.write_all(plaintext.clone().as_bytes())?;
 
         // Finalize the OpenPGP message to make sure that all data is
         // written.
@@ -162,9 +221,15 @@ pub mod pgp {
                         // whether the signature checks out mathematically, we apply
                         // our policy.
                         match results.into_iter().next() {
-                            Some(Ok(_)) => good = true,
-                            Some(Err(e)) => return Err(openpgp::Error::from(e).into()),
-                            None => return Err(anyhow::anyhow!("No signature")),
+                            Some(Ok(_)) => {
+                                good = true;
+                            }
+                            Some(Err(e)) => {
+                                return Err(openpgp::Error::from(e).into());
+                            }
+                            None => {
+                                return Err(anyhow::anyhow!("No signature"));
+                            }
                         }
                     }
                     (_o, _b) => {

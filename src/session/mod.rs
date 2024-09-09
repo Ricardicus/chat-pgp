@@ -3,9 +3,9 @@ use std::pin::Pin;
 use std::process::exit;
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
 use std::time::SystemTime;
 use tokio::sync::{mpsc, Mutex};
+use tokio::time::{timeout, Duration};
 
 pub mod crypto;
 pub mod messages;
@@ -16,7 +16,7 @@ use protocol::*;
 
 use crypto::{
     sha256sum, ChaCha20Poly1305EnDeCrypt, Cryptical, CrypticalDecrypt, CrypticalEncrypt,
-    PGPEnCryptOwned, PGPEnDeCrypt,
+    CrypticalSign, CrypticalVerify, PGPEnCryptOwned, PGPEnDeCrypt,
 };
 
 use messages::MessageData::{
@@ -104,7 +104,15 @@ where
         Mutex<Vec<Box<dyn Fn(String) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>>>,
     >,
     pub callbacks_init_declined: Arc<
-        Mutex<Vec<Box<dyn Fn(String) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>>>,
+        Mutex<
+            Vec<
+                Box<
+                    dyn Fn(String, String) -> Pin<Box<dyn Future<Output = ()> + Send>>
+                        + Send
+                        + Sync,
+                >,
+            >,
+        >,
     >,
     pub callbacks_terminate:
         Arc<Mutex<Vec<Box<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>>>>,
@@ -126,6 +134,7 @@ where
     >,
 
     pub middleware_config: String,
+    discovery_interval_seconds: u64,
     running: Arc<Mutex<bool>>,
 }
 
@@ -151,6 +160,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
             callbacks_terminate: Arc::new(Mutex::new(Vec::new())),
             callbacks_chat_input: Arc::new(Mutex::new(Vec::new())),
             middleware_config,
+            discovery_interval_seconds: 60,
             running: Arc::new(Mutex::new(true)),
         }
     }
@@ -176,6 +186,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
             callbacks_terminate: Arc::clone(&self.callbacks_terminate),
             callbacks_chat_input: Arc::clone(&self.callbacks_chat_input),
             middleware_config: self.middleware_config.clone(),
+            discovery_interval_seconds: self.discovery_interval_seconds,
             running: self.running.clone(),
         }
     }
@@ -373,11 +384,13 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
         let mut callbacks = self.callbacks_init_await.lock().await;
         callbacks.push(callback);
     }
-    pub async fn register_callback_init_decline(
+    pub async fn register_callback_init_declined(
         &self,
-        callback: Box<dyn Fn(String) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>,
+        callback: Box<
+            dyn Fn(String, String) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync,
+        >,
     ) {
-        let mut callbacks = self.callbacks_init_await.lock().await;
+        let mut callbacks = self.callbacks_init_declined.lock().await;
         callbacks.push(callback);
     }
     pub async fn register_callback_init_accepted(
@@ -446,10 +459,10 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
         }
         true
     }
-    async fn call_callbacks_init_declined(&self, arg1: &str) -> bool {
-        let callbacks = self.callbacks_init_accepted.lock().await;
+    async fn call_callbacks_init_declined(&self, arg1: &str, arg2: &str) -> bool {
+        let callbacks = self.callbacks_init_declined.lock().await;
         for callback in callbacks.iter() {
-            callback(arg1.to_string()).await;
+            callback(arg1.to_string(), arg2.to_string()).await;
         }
         true
     }
@@ -471,11 +484,17 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
         }
         let cert = cert.unwrap();
         let other_key_fingerprint = cert.fingerprint().to_string();
+        let pub_key = self.host_encro.lock().await.get_public_key_fingerprint();
+        let signature = match self.host_encro.lock().await.sign(&pub_key) {
+            Ok(s) => s,
+            Err(e) => {
+                return Err(e);
+            }
+        };
+
         let pub_key = self.host_encro.lock().await.get_public_key_as_base64();
         let message = Message {
-            message: MessageData::Init(InitMsg {
-                pub_key: self.host_encro.lock().await.get_public_key_as_base64(),
-            }),
+            message: MessageData::Init(InitMsg { pub_key, signature }),
             session_id: "".to_string(),
         };
         let mut topic = Topic::Initialize.as_str().to_string();
@@ -586,7 +605,11 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
         }
     }
 
-    pub async fn serve(&mut self) {
+    pub fn set_discovery_interval_seconds(&mut self, interval_seconds: u64) {
+        self.discovery_interval_seconds = interval_seconds;
+    }
+
+    pub async fn serve(&mut self) -> Result<(), MessagingError> {
         let pub_key = self.host_encro.lock().await.get_public_key_fingerprint();
         let mut topics_to_subscribe = Vec::new();
 
@@ -608,24 +631,25 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
             .await;
         let zc = self.middleware_config.clone();
         let zenoh_config = Config::from_file(zc).unwrap();
-        let zenoh_session_responder =
-            Arc::new(Mutex::new(zenoh::open(zenoh_config).res().await.unwrap()));
+        let zenoh_session = zenoh::open(zenoh_config).res().await;
+        if zenoh_session.is_err() {
+            return Err(MessagingError::ZenohError);
+        }
+        let zenoh_session = zenoh_session.unwrap();
+        let zenoh_session_responder = Arc::new(Mutex::new(zenoh_session));
         let responder = ZenohHandler::new(zenoh_session_responder);
         // Send discover message each minut
         let mut session_discover = self.clone();
         let keep_running_discover = self.running.clone();
+        let discovery_interval_seconds = self.discovery_interval_seconds;
         tokio::spawn(async move {
-            let mut seconds = 0;
             let mut keep_running;
             {
                 keep_running = *keep_running_discover.lock().await;
             }
             while keep_running {
-                if seconds % 60 == 0 {
-                    let _ = session_discover.discover().await;
-                }
-                tokio::time::sleep(Duration::from_secs(1)).await;
-                seconds += 1;
+                let _ = session_discover.discover().await;
+                tokio::time::sleep(Duration::from_secs(discovery_interval_seconds)).await;
                 {
                     keep_running = *keep_running_discover.lock().await;
                 }
@@ -633,7 +657,19 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
         });
         let keep_running = self.running.clone();
         while *keep_running.lock().await {
-            let received = self.rx.recv().await.expect("Error in session");
+            let timeout_duration = Duration::from_secs(5);
+            let received = match timeout(timeout_duration, self.rx.recv()).await {
+                Ok(Some(received)) => Some(received),
+                Ok(None) => None,
+                Err(_) => {
+                    // Timeout occurred, continue to the next iteration of the loop
+                    None
+                }
+            };
+            if received.is_none() {
+                continue;
+            }
+            let received = received.unwrap();
             let topic = received.0;
             let mut topic_error = Topic::Errors.as_str().to_string();
             topic_error.push_str("/");
@@ -670,6 +706,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                 Err(_) => {}
             };
         }
+        return Ok(());
     }
 
     pub async fn serve_testing(&mut self) {
@@ -736,8 +773,15 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
         }
     }
 
+    pub async fn stop_session(&mut self) {
+        *self.running.lock().await = false;
+    }
+
     pub async fn get_discovered(&self) -> Vec<String> {
-        let discovered = self.discovered.lock().await;
+        let mut discovered;
+        {
+            discovered = self.discovered.lock().await;
+        }
         let mut discovered_keys = Vec::new();
         for (fingerprint, key) in discovered.iter() {
             discovered_keys.push(key.clone());
@@ -1001,6 +1045,8 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                     }
                 }
 
+                let signature = msg.signature.clone();
+                let pub_key = msg.pub_key.clone();
                 let pub_key_decoded = match base64::decode(msg.pub_key) {
                     Err(_) => {
                         return Err(SessionErrorMsg {
@@ -1012,6 +1058,21 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                 };
                 match PGPEnCryptOwned::new_from_vec(&pub_key_decoded) {
                     Ok(pub_encro) => {
+                        {
+                            let other_key = pub_encro.get_public_key_fingerprint();
+
+                            if let Err(s) = pub_encro.verify(&signature, &other_key) {
+                                let msg = Message::new_init_decline(
+                                    pub_key.clone(),
+                                    "Invalid signature".to_owned(),
+                                );
+                                let mut topic_response = Topic::Initialize.as_str().to_string();
+                                topic_response.push_str("/");
+                                topic_response.push_str(&pub_encro.get_public_key_fingerprint());
+                                return Ok(Some((msg, topic_response)));
+                            }
+                        }
+
                         let pub_key = pub_encro.get_public_key_as_base64();
                         let initialize_this = self.call_callbacks_init_incoming(&pub_key).await;
                         let this_pub_key = self.host_encro.lock().await.get_public_key_as_base64();
@@ -1088,7 +1149,8 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                 Ok(None)
             }
             InitDecline(msg) => {
-                self.call_callbacks_init_declined(&msg.pub_key).await;
+                self.call_callbacks_init_declined(&msg.pub_key, &msg.message)
+                    .await;
                 Ok(None)
             }
             InitOk(msg) => {
