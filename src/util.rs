@@ -42,5 +42,5 @@ pub fn execute_command(command: &str) -> Result<String, String> {
 
 pub fn get_current_datetime() -> String {
     let now: DateTime<Utc> = Utc::now();
-    now.to_string()
+    now.format("%Y-%m-%d %H:%M:%S").to_string()
 }

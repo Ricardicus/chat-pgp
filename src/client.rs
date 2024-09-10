@@ -19,11 +19,10 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 
 mod util;
+use util::get_current_datetime;
 
 mod pgp;
-use pgp::pgp::{
-    generate_new_key, get_public_key_as_base64, read_from_gpg, read_from_vec, test_sign_verify,
-};
+use pgp::pgp::{generate_new_key, get_public_key_as_base64, read_from_gpg, read_from_vec};
 
 extern crate sequoia_openpgp as openpgp;
 use openpgp::cert::prelude::*;
@@ -250,10 +249,12 @@ async fn cb_chat(public_key: String, message: String) {
     };
     match PGPEnCryptOwned::new_from_vec(&pub_key_decoded) {
         Ok(pub_encro) => {
+            let date_time = get_current_datetime();
             println_message(
                 0,
                 format!(
-                    "{} ({}): {}",
+                    "{} - {} ({}): {}",
+                    date_time,
                     pub_encro.get_userid(),
                     short_fingerprint(&pub_encro.get_public_key_fingerprint()),
                     message
@@ -298,6 +299,33 @@ async fn cb_chat_input(
         );
     }
     return Some((topic.to_string(), msg.serialize().unwrap()));
+}
+
+async fn cb_closed(public_key: String, session_id: String) {
+    let pub_key_decoded = base64::decode(public_key);
+    if pub_key_decoded.is_err() {
+        return;
+    }
+    let pub_key_decoded = pub_key_decoded.unwrap();
+
+    match PGPEnCryptOwned::new_from_vec(&pub_key_decoded) {
+        Ok(pub_encro) => {
+            let userid = pub_encro.get_userid();
+            let fingerprint = pub_encro.get_public_key_fingerprint();
+            let fingerprint_short = short_fingerprint(&fingerprint);
+            let date_and_time = get_current_datetime();
+
+            println_message(
+                0,
+                format!(
+                    "[{} - ** {} ({}) has terminated the chat session **]",
+                    date_and_time, userid, fingerprint_short
+                ),
+            )
+            .await;
+        }
+        _ => {}
+    }
 }
 
 async fn cb_discovered(public_key: String) -> bool {
@@ -774,6 +802,9 @@ async fn main() {
     let callback_init_declined = move |arg1: String, arg2: String| {
         Box::pin(cb_init_declined(arg1, arg2)) as Pin<Box<dyn Future<Output = ()> + Send>>
     };
+    let callback_session_close = move |arg1: String, arg2: String| {
+        Box::pin(cb_closed(arg1, arg2)) as Pin<Box<dyn Future<Output = ()> + Send>>
+    };
     let callback_chat_input = move |arg1: String, arg2: String, arg3: String| {
         Box::pin(cb_chat_input(arg1, arg2, arg3))
             as Pin<Box<dyn Future<Output = Option<(String, String)>> + Send>>
@@ -805,6 +836,9 @@ async fn main() {
         .await;
     session
         .register_callback_terminate(Box::new(callback_terminate))
+        .await;
+    session
+        .register_callback_session_close(Box::new(callback_session_close))
         .await;
 
     let tx = session.get_tx().await;

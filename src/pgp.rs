@@ -70,23 +70,6 @@ pub mod pgp {
         }
     }
 
-    pub fn test_sign_verify(cert: &openpgp::Cert) -> bool {
-        let mut v = Vec::new();
-        let text = "hello".to_string();
-        let passphrase = "1234512345".to_string();
-
-        sign(&mut v, &text, cert, &passphrase);
-
-        //let val = v;// base64::encode(v);
-
-        //let val = val; //base64::decode(val).unwrap();
-        let val = v;
-        match verify(&val, &text, &cert) {
-            Ok(_) => true,
-            Err(_) => false,
-        }
-    }
-
     pub fn sign(
         sink: &mut (dyn Write + Send + Sync),
         plaintext: &str,
