@@ -1,6 +1,6 @@
 # Chat-PGP
 
-Welcome to PGP chat. This in a encrypted chat platform based on [PGP](https://en.wikipedia.org/wiki/Pretty_Good_Privacy).
+Welcome to chat PGP. This is an encrypted chat platform based on [PGP](https://en.wikipedia.org/wiki/Pretty_Good_Privacy).
 
 The idea is to create a simple chat platform that is based on strong encryption. 
 
@@ -16,8 +16,8 @@ The communication protocol is built on [Zenoh](https://github.com/eclipse-zenoh/
 
 Zenoh is an extremely flexible middleware that does not force a network topology onto
 the project. By providing a configuration file to zenoh, one can configure an entire network
-of routers oneself: so that one does not have to rely on routers and peers I setup for
-this project. There is support for TLS (one- and two-way) authentication in zenoh.
+of routers oneself; so that one does not have to rely on routers and peers someone else setup for
+this project. There is support for TLS (one- and two-way) authentication in zenoh. The default behaviour is desrocbed in the file zenoh/config.json5 . 
 
 ## Work in progress
 
