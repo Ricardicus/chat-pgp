@@ -11,7 +11,7 @@ use session::protocol::*;
 use session::Session;
 use std::fs;
 use std::future::Future;
-use std::io;
+
 use std::pin::Pin;
 use std::process::exit;
 use std::sync::Arc;
@@ -22,7 +22,7 @@ mod util;
 use util::get_current_datetime;
 
 mod pgp;
-use pgp::pgp::{generate_new_key, get_public_key_as_base64, read_from_gpg, read_from_vec};
+use pgp::pgp::{generate_new_key, read_from_gpg, read_from_vec};
 
 extern crate sequoia_openpgp as openpgp;
 use openpgp::cert::prelude::*;
@@ -32,10 +32,10 @@ use ncurses::*;
 
 mod terminal;
 use terminal::{
-    NewWindowCommand, PrintCommand, ReadCommand, WindowCommand, WindowManager, WindowPipe,
+    NewWindowCommand, PrintCommand, WindowCommand, WindowManager, WindowPipe,
 };
 
-use session::middleware::{ZMQHandler, ZenohHandler};
+
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -199,7 +199,7 @@ impl InputCommand {
     }
 
     async fn print_help() {
-        let mut help_text = String::new();
+        let _help_text = String::new();
         println_message_str(1, "Available commands:").await;
         println_message_str(1, "!list").await;
         println_message_str(1, "- List and enumerate all discovered peers.").await;
@@ -271,8 +271,8 @@ async fn cb_chat_input(
     session_id: String,
     topic_out: String,
 ) -> Option<(String, String)> {
-    let prompt = ">> ".to_string();
-    let mut input = read_chat_message(1).await;
+    let _prompt = ">> ".to_string();
+    let input = read_chat_message(1).await;
     if input.is_err() {
         return None;
     }
@@ -301,7 +301,7 @@ async fn cb_chat_input(
     return Some((topic.to_string(), msg.serialize().unwrap()));
 }
 
-async fn cb_closed(public_key: String, session_id: String) {
+async fn cb_closed(public_key: String, _session_id: String) {
     let pub_key_decoded = base64::decode(public_key);
     if pub_key_decoded.is_err() {
         return;
@@ -336,7 +336,7 @@ async fn cb_discovered(public_key: String) -> bool {
         Ok(pub_key) => pub_key,
     };
     match PGPEnCryptOwned::new_from_vec(&pub_key_decoded) {
-        Ok(pub_encro) => true,
+        Ok(_pub_encro) => true,
         _ => false,
     }
 }
@@ -345,7 +345,7 @@ async fn cb_terminate() {
     println_message(1, format!("-- Terminating session ...")).await;
 }
 
-async fn cb_init_declined(public_key: String, message: String) {
+async fn cb_init_declined(public_key: String, _message: String) {
     let pub_key_decoded = match base64::decode(public_key) {
         Err(_) => {
             return;
@@ -389,7 +389,7 @@ async fn cb_init_await(public_key: String) {
     }
 }
 
-async fn cb_init_accepted(public_key: String) {
+async fn cb_init_accepted(_public_key: String) {
     println_message(
         1,
         format!("-- Peer accepted the connection. You can now chat!"),
@@ -405,7 +405,7 @@ async fn cb_init_incoming(public_key: String) -> bool {
         Ok(pub_key) => pub_key,
     };
     match PGPEnCryptOwned::new_from_vec(&pub_key_decoded) {
-        Ok(pub_encro) => true,
+        Ok(_pub_encro) => true,
         _ => {
             let _ = &format!("-- Chat was not initiailized");
             false
@@ -504,7 +504,7 @@ async fn terminal_program(
                 }
             }
         } else {
-            let mut input;
+            let input;
             if print_prompt {
                 input = read_message(1, ">> ", &upper_prompt, 1).await;
             } else {
@@ -584,11 +584,11 @@ async fn terminal_program(
                                         ),
                                     )
                                     .await;
-                                    let session_id = match session
+                                    let _session_id = match session
                                         .initialize_session_zenoh(peer.clone())
                                         .await
                                     {
-                                        Ok(ok) => {}
+                                        Ok(_ok) => {}
                                         Err(not_ok) => {
                                             terminate(session_tx.clone()).await;
                                             println!("{}", not_ok);
@@ -671,9 +671,9 @@ async fn launch_terminal_program(
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let pgp_handler = PGPEnDeCrypt::new_no_certpass(cert.clone());
-    let pub_key_fingerprint = pgp_handler.get_public_key_fingerprint();
-    let pub_key_userid = pgp_handler.get_userid();
-    let pub_key_full = pgp_handler.get_public_key_as_base64();
+    let _pub_key_fingerprint = pgp_handler.get_public_key_fingerprint();
+    let _pub_key_userid = pgp_handler.get_userid();
+    let _pub_key_full = pgp_handler.get_public_key_as_base64();
 
     let (max_y, max_x) = WindowManager::get_max_yx();
     let num_windows = 2;

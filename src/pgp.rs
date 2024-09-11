@@ -78,7 +78,7 @@ pub mod pgp {
     ) -> openpgp::Result<()> {
         let p = &P::new();
         // Get the keypair to do the signing from the Cert.
-        let key = tsk.primary_key().key().clone().parts_into_secret()?;
+        let _key = tsk.primary_key().key().clone().parts_into_secret()?;
         let mut keypair = None;
         if passphrase.len() == 0 {
             keypair = Some(
@@ -135,7 +135,7 @@ pub mod pgp {
         let mut message = LiteralWriter::new(message).build()?;
 
         // Sign the data.
-        message.write_all(plaintext.clone().as_bytes())?;
+        message.write_all(plaintext.as_bytes())?;
 
         // Finalize the OpenPGP message to make sure that all data is
         // written.

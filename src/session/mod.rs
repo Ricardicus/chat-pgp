@@ -1,12 +1,12 @@
 use std::collections::HashMap;
-use std::fs::OpenOptions;
+
 use std::pin::Pin;
 use std::sync::Arc;
-use std::thread;
+
 use std::time::SystemTime;
 use tokio::sync::{mpsc, Mutex};
 
-use std::io::Write;
+
 use tokio::time::{timeout, Duration};
 
 pub mod crypto;
@@ -28,8 +28,7 @@ use messages::MessageData::{
 use messages::MessagingError::*;
 use messages::SessionMessage as Message;
 use messages::{
-    ChatMsg, EncryptedMsg, HeartbeatMsg, InitAwaitMsg, InitDeclineMsg, InitMsg, InitOkMsg,
-    InternalMsg, MessageData, MessageListener, Messageble, MessagebleTopicAsync,
+    ChatMsg, EncryptedMsg, InitMsg, MessageData, MessageListener, Messageble, MessagebleTopicAsync,
     MessagebleTopicAsyncPublishReads, MessagebleTopicAsyncReadTimeout, MessagingError,
     SessionErrorCodes, SessionErrorMsg,
 };
@@ -148,6 +147,7 @@ where
 
     pub middleware_config: String,
     discovery_interval_seconds: u64,
+    heartbeat_interval_seconds: u64,
     running: Arc<Mutex<bool>>,
 }
 
@@ -177,6 +177,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
 
             middleware_config,
             discovery_interval_seconds: 60,
+            heartbeat_interval_seconds: 10,
             running: Arc::new(Mutex::new(true)),
         }
     }
@@ -206,6 +207,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
 
             middleware_config: self.middleware_config.clone(),
             discovery_interval_seconds: self.discovery_interval_seconds,
+            heartbeat_interval_seconds: self.heartbeat_interval_seconds,
             running: self.running.clone(),
         }
     }
@@ -540,7 +542,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
         let zenoh_session = Arc::new(Mutex::new(zenoh::open(zenoh_config).res().await.unwrap()));
         let handler = ZenohHandler::new(zenoh_session);
 
-        let await_response_interval = Duration::from_secs(60);
+        let _await_response_interval = Duration::from_secs(60);
 
         {
             let mut requests = self.requests_outgoing_initialization.lock().await;
@@ -561,11 +563,11 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
 
         for topic in topics {
             let tx_clone = tx.clone();
-            let t = topic.clone();
+            let _t = topic.clone();
             let zc = self.middleware_config.clone();
 
             let terminate_callbacks = self.callbacks_terminate.clone();
-            let mut running = self.running.clone();
+            let running = self.running.clone();
             let h = tokio::spawn(async move {
                 let zenoh_config = Config::from_file(zc).unwrap();
                 let zenoh_session = zenoh::open(zenoh_config.clone()).res().await;
@@ -581,7 +583,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                 let handler = ZenohHandler::new(zenoh_session);
                 let mut keep_running = *running.lock().await;
                 while keep_running {
-                    let result = handler.read_messages(&topic, &tx_clone).await;
+                    let _result = handler.read_messages(&topic, &tx_clone).await;
                     {
                         keep_running = *running.lock().await;
                     }
@@ -626,7 +628,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                     )
                     .await
                     {
-                        if let Err(e) = tx_clone.send((topic, msg)).await {}
+                        if let Err(_e) = tx_clone.send((topic, msg)).await {}
                     }
                 }
                 {
@@ -645,23 +647,19 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
         hm.clone()
     }
 
-    pub async fn launch_discovery(&mut self) {
+    pub async fn launch_discovery(&mut self, handler: Arc<Mutex<ZenohHandler>>) {
         let mut session_discover = self.clone();
         let keep_running_discover = self.running.clone();
         let discovery_interval_seconds = self.discovery_interval_seconds;
-        let zc = self.middleware_config.clone();
+        let _zc = self.middleware_config.clone();
+        let handler = handler.clone();
         tokio::spawn(async move {
             let mut keep_running;
             {
                 keep_running = *keep_running_discover.lock().await;
             }
-
-            let zenoh_config = Config::from_file(zc).unwrap();
-            let zenoh_session =
-                Arc::new(Mutex::new(zenoh::open(zenoh_config).res().await.unwrap()));
-            let handler = ZenohHandler::new(zenoh_session);
             while keep_running {
-                let _ = session_discover.discover(&handler).await;
+                let _ = session_discover.discover(handler.clone()).await;
                 tokio::time::sleep(Duration::from_secs(discovery_interval_seconds)).await;
                 {
                     keep_running = *keep_running_discover.lock().await;
@@ -671,7 +669,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
     }
 
     pub async fn terminate_session_locally(&mut self, session_id: &str) {
-        let signature = match self.host_encro.lock().await.sign(session_id) {
+        let _signature = match self.host_encro.lock().await.sign(session_id) {
             Ok(s) => s,
             Err(_) => {
                 return;
@@ -690,8 +688,8 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
         };
         match PGPEnCryptOwned::new_from_vec(&pub_key_decoded) {
             Ok(pub_encro) => {
-                let pub_key = self.host_encro.lock().await.get_public_key_as_base64();
-                let topic = Topic::close_topic(&pub_encro.get_public_key_fingerprint());
+                let _pub_key = self.host_encro.lock().await.get_public_key_as_base64();
+                let _topic = Topic::close_topic(&pub_encro.get_public_key_fingerprint());
 
                 let mut hm = self.sessions.lock().await;
                 hm.remove(session_id);
@@ -709,7 +707,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
         }
     }
 
-    pub async fn terminate_session(&mut self, session_id: &str, sender: &ZenohHandler) {
+    pub async fn terminate_session(&mut self, session_id: &str, sender: Arc<Mutex<ZenohHandler>>) {
         let signature = match self.host_encro.lock().await.sign(session_id) {
             Ok(s) => s,
             Err(_) => {
@@ -732,7 +730,10 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                 let pub_key = self.host_encro.lock().await.get_public_key_as_base64();
                 let msg = Message::new_close(session_id.to_string(), pub_key, signature);
                 let topic = Topic::close_topic(&pub_encro.get_public_key_fingerprint());
-                let _ = sender.send_message(&topic, msg).await;
+                {
+                    let sender = sender.lock().await;
+                    let _ = sender.send_message(&topic, msg).await;
+                }
 
                 let mut hm = self.sessions.lock().await;
                 hm.remove(session_id);
@@ -750,21 +751,19 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
         }
     }
 
-    pub async fn launch_session_housekeeping(&mut self) {
+    pub async fn launch_session_housekeeping(&mut self, sender: Arc<Mutex<ZenohHandler>>) {
         let mut session_discover = self.clone();
         let keep_running_discover = self.running.clone();
-        let discovery_interval_seconds = self.discovery_interval_seconds;
-        let zc = self.middleware_config.clone();
-        let wait_factor = 5; // 5 times the discovery interval, hard coded for now?
+        let heartbeat_interval_seconds = self.heartbeat_interval_seconds;
+        let _zc = self.middleware_config.clone();
+        let wait_factor = 10; // 5 times the discovery interval, hard coded for now?
+        let handler = sender.clone();
         tokio::spawn(async move {
             let mut keep_running;
             {
                 keep_running = *keep_running_discover.lock().await;
             }
-            let zenoh_config = Config::from_file(zc).unwrap();
-            let zenoh_session =
-                Arc::new(Mutex::new(zenoh::open(zenoh_config).res().await.unwrap()));
-            let handler = ZenohHandler::new(zenoh_session);
+
             while keep_running {
                 let sessions;
                 {
@@ -775,9 +774,9 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                     let now = SystemTime::now();
                     let last_active = session_data.last_active;
                     let duration = now.duration_since(last_active).unwrap();
-                    if duration.as_secs() > discovery_interval_seconds * wait_factor {
+                    if duration.as_secs() > heartbeat_interval_seconds * wait_factor {
                         let _ = session_discover
-                            .terminate_session(&session_id.clone(), &handler)
+                            .terminate_session(&session_id.clone(), handler.clone())
                             .await;
                     }
                     session_ids.push((session_id.clone(), session_data.pub_key.clone()));
@@ -796,13 +795,15 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                             let fingerprint = pub_encro.get_public_key_fingerprint();
                             let msg = Message::new_heartbeat(session_id);
                             let topic = Topic::heartbeat_topic(&fingerprint);
-
-                            let _ = handler.send_message(&topic, msg).await;
+                            {
+                                let handler = handler.lock().await;
+                                let _ = handler.send_message(&topic, msg).await;
+                            }
                         }
                         Err(_) => {}
                     }
                 }
-                tokio::time::sleep(Duration::from_secs(discovery_interval_seconds)).await;
+                tokio::time::sleep(Duration::from_secs(heartbeat_interval_seconds)).await;
                 {
                     keep_running = *keep_running_discover.lock().await;
                 }
@@ -840,11 +841,11 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
         }
         let zenoh_session = zenoh_session.unwrap();
         let zenoh_session_responder = Arc::new(Mutex::new(zenoh_session));
-        let responder = ZenohHandler::new(zenoh_session_responder);
+        let responder = Arc::new(Mutex::new(ZenohHandler::new(zenoh_session_responder)));
         // Send discover message each minut
-        self.launch_discovery().await;
+        self.launch_discovery(responder.clone()).await;
         // Launch session housekeeping
-        // self.launch_session_housekeeping().await;
+        self.launch_session_housekeeping(responder.clone()).await;
         let keep_running = self.running.clone();
         while *keep_running.lock().await {
             let timeout_duration = Duration::from_secs(5);
@@ -877,9 +878,12 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                                 continue;
                             }
                             let _ = response.clone();
-                            let _ = responder
-                                .send_message(&topic_response, response.clone())
-                                .await;
+                            {
+                                let responder = responder.lock().await;
+                                let _ = responder
+                                    .send_message(&topic_response, response.clone())
+                                    .await;
+                            }
                         }
                         Ok(None) => {}
                         Err(errormessage) => {
@@ -889,7 +893,10 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                                 session_id,
                             };
                             let _ = response.to_string();
-                            let _ = responder.send_message(&topic_error, response).await;
+                            {
+                                let responder = responder.lock().await;
+                                let _ = responder.send_message(&topic_error, response).await;
+                            }
                         }
                     }
                 }
@@ -897,17 +904,17 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
             };
         }
 
-        self.close_sessions(&responder).await;
+        self.close_sessions(responder).await;
         return Ok(());
     }
 
-    pub async fn close_sessions(&mut self, sender: &ZenohHandler) {
+    pub async fn close_sessions(&mut self, sender: Arc<Mutex<ZenohHandler>>) {
         let sessions;
         {
             sessions = self.get_sessions().await;
         }
-        for (session_id, session_data) in sessions.iter() {
-            let _ = self.terminate_session(session_id, &sender).await;
+        for (session_id, _session_data) in sessions.iter() {
+            let _ = self.terminate_session(session_id, sender.clone()).await;
         }
     }
 
@@ -916,29 +923,35 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
     }
 
     pub async fn get_discovered(&self) -> Vec<String> {
-        let mut discovered;
+        let discovered;
         {
             discovered = self.discovered.lock().await;
         }
         let mut discovered_keys = Vec::new();
-        for (fingerprint, key) in discovered.iter() {
+        for (_fingerprint, key) in discovered.iter() {
             discovered_keys.push(key.clone());
         }
         discovered_keys
     }
 
-    pub async fn discover(&mut self, sender: &ZenohHandler) -> Result<(), MessagingError> {
+    pub async fn discover(
+        &mut self,
+        sender: Arc<Mutex<ZenohHandler>>,
+    ) -> Result<(), MessagingError> {
         let discover_topic = Topic::Discover.as_str();
         let mut discover_topic_reply = discover_topic.to_string();
         discover_topic_reply.push_str(Topic::reply_suffix());
-        let timeout_discovery = Duration::from_secs(5);
+        let _timeout_discovery = Duration::from_secs(5);
 
         let mut this_pub_key = None;
         {
             this_pub_key = Some(self.host_encro.lock().await.get_public_key_as_base64());
         }
         let msg = Message::new_discovery(this_pub_key.clone().unwrap());
-        self.send(msg, discover_topic, sender).await?;
+        {
+            let h = sender.lock().await;
+            h.send_message(discover_topic, msg).await?;
+        }
         Ok(())
     }
 
@@ -954,7 +967,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
     ) -> Result<Message, MessagingError> {
         match gateway.send_message(topic_tx, send_msg).await {
             Ok(_) => {}
-            Err(error) => return Err(MessagingError::UnreachableHost),
+            Err(_error) => return Err(MessagingError::UnreachableHost),
         };
         gateway.read_message_timeout(topic_rx, timeout).await
     }
@@ -971,7 +984,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
     ) -> Result<Vec<Message>, MessagingError> {
         match gateway.send_message(topic_tx, send_msg).await {
             Ok(_) => {}
-            Err(error) => return Err(MessagingError::UnreachableHost),
+            Err(_error) => return Err(MessagingError::UnreachableHost),
         };
         gateway.read_messages_timeout(topic_rx, timeout).await
     }
@@ -984,7 +997,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
     ) -> Result<(), MessagingError> {
         match gateway.send_message(topic_tx, send_msg).await {
             Ok(_) => {}
-            Err(error) => return Err(MessagingError::UnreachableHost),
+            Err(_error) => return Err(MessagingError::UnreachableHost),
         };
         Ok(())
     }
@@ -1119,7 +1132,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
 
                 Ok(None)
             }
-            Heartbeat(msg) => {
+            Heartbeat(_msg) => {
                 if let Some(session_data) = self.sessions.lock().await.get_mut(&session_id) {
                     session_data.last_active = SystemTime::now();
                 }
@@ -1200,7 +1213,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                         {
                             let other_key = pub_encro.get_public_key_fingerprint();
 
-                            if let Err(s) = pub_encro.verify(&signature, &other_key) {
+                            if let Err(_s) = pub_encro.verify(&signature, &other_key) {
                                 let msg = Message::new_init_decline(
                                     pub_key.clone(),
                                     "Invalid signature".to_owned(),
@@ -1306,7 +1319,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                     }
                 };
                 let mut add_session = None;
-                let this_pub_key = self.host_encro.lock().await.get_public_key_as_base64();
+                let _this_pub_key = self.host_encro.lock().await.get_public_key_as_base64();
                 {
                     let pendings = self.requests_outgoing_initialization.lock().await;
                     let pub_key_dec = base64::decode(&msg.pub_key);
