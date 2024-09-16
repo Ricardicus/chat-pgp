@@ -64,37 +64,18 @@ struct Cli {
 }
 
 // Create a global instance of WindowManager
-static mut PIPE_WIN0: Lazy<WindowPipe> = Lazy::new(|| WindowPipe::new());
-static mut PIPE_WIN1: Lazy<WindowPipe> = Lazy::new(|| WindowPipe::new());
+static mut PIPE: Lazy<WindowPipe> = Lazy::new(|| WindowPipe::new());
 
 async fn println_message(window: usize, message: String) {
-    if window == 0 {
-        unsafe {
-            PIPE_WIN0
-                .send(WindowCommand::Println(PrintCommand { window, message }))
-                .await;
-        }
-    } else {
-        unsafe {
-            PIPE_WIN1
-                .send(WindowCommand::Println(PrintCommand { window, message }))
-                .await;
-        }
+    unsafe {
+        PIPE.send(WindowCommand::Println(PrintCommand { window, message }))
+            .await;
     }
 }
 async fn print_message(window: usize, message: String) {
-    if window == 0 {
-        unsafe {
-            PIPE_WIN0
-                .send(WindowCommand::Print(PrintCommand { window, message }))
-                .await;
-        }
-    } else {
-        unsafe {
-            PIPE_WIN1
-                .send(WindowCommand::Print(PrintCommand { window, message }))
-                .await;
-        }
+    unsafe {
+        PIPE.send(WindowCommand::Print(PrintCommand { window, message }))
+            .await;
     }
 }
 async fn read_message(
@@ -104,43 +85,21 @@ async fn read_message(
     timeout: i32,
 ) -> Result<String, ()> {
     let mut input = Err(());
-    if window == 0 {
-        unsafe {
-            input = PIPE_WIN0
-                .get_input(window, prompt, upper_prompt, timeout)
-                .await;
-        }
-    } else {
-        unsafe {
-            input = PIPE_WIN1
-                .get_input(window, prompt, upper_prompt, timeout)
-                .await;
-        }
+    unsafe {
+        input = PIPE.get_input(window, prompt, upper_prompt, timeout).await;
     }
     input
 }
 async fn read_chat_message(window: usize) -> Result<Option<String>, ()> {
     let mut input = Err(());
-    if window == 0 {
-        unsafe {
-            input = PIPE_WIN0.get_chat_input().await;
-        }
-    } else {
-        unsafe {
-            input = PIPE_WIN1.get_chat_input().await;
-        }
+    unsafe {
+        input = PIPE.get_chat_input().await;
     }
     input
 }
 async fn send_chat_message(window: usize, message: Option<String>) {
-    if window == 0 {
-        unsafe {
-            PIPE_WIN0.tx_chat_input(message).await;
-        }
-    } else {
-        unsafe {
-            PIPE_WIN1.tx_chat_input(message).await;
-        }
+    unsafe {
+        PIPE.tx_chat_input(message).await;
     }
 }
 
@@ -272,6 +231,7 @@ async fn cb_chat_input(
 ) -> Option<(String, String)> {
     let prompt = ">> ".to_string();
     let mut input = read_chat_message(1).await;
+    println!("READ INPUT: {:?}", input);
     if input.is_err() {
         return None;
     }
@@ -386,13 +346,9 @@ async fn cb_init_incoming(public_key: String) -> bool {
 }
 
 async fn terminate(session_tx: mpsc::Sender<(String, String)>) {
-    let pipe0;
+    let pipe;
     unsafe {
-        pipe0 = PIPE_WIN0.clone();
-    }
-    let pipe1;
-    unsafe {
-        pipe1 = PIPE_WIN1.clone();
+        pipe = PIPE.clone();
     }
     let topic = Topic::Internal.as_str();
     let msg = SessionMessage::new_internal(
@@ -400,8 +356,7 @@ async fn terminate(session_tx: mpsc::Sender<(String, String)>) {
         "terminate".to_owned(),
         topic.to_string(),
     );
-    pipe0.send(WindowCommand::Shutdown()).await;
-    pipe1.send(WindowCommand::Shutdown()).await;
+    pipe.send(WindowCommand::Shutdown()).await;
     send_chat_message(1, None).await;
 
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -477,11 +432,13 @@ async fn terminal_program(
             }
         } else {
             let mut input;
+            println!("reading input....");
             if print_prompt {
                 input = read_message(1, ">> ", &upper_prompt, 1).await;
             } else {
                 input = read_message(1, "", &upper_prompt, 1).await;
             }
+            println!("ok read input: {:?}", input);
             if input.is_ok() {
                 let input = input.unwrap();
                 if input.len() > 0 {
@@ -608,38 +565,23 @@ async fn launch_terminal_program(
     session_tx: mpsc::Sender<(String, String)>,
     session: Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt>,
 ) {
-    let pipe0;
+    let pipe;
     unsafe {
-        pipe0 = PIPE_WIN0.clone();
-    }
-    let pipe1;
-    unsafe {
-        pipe1 = PIPE_WIN1.clone();
+        pipe = PIPE.clone();
     }
     // Setup window manager serving
     tokio::spawn(async move {
         let mut window_manager = WindowManager::new();
 
-        let pipe_clone = pipe0.clone();
+        let pipe_clone = pipe.clone();
         window_manager.serve(pipe_clone).await;
     });
-    tokio::spawn(async move {
-        let mut window_manager = WindowManager::new();
-
-        let pipe_clone = pipe1.clone();
-        window_manager.serve(pipe_clone).await;
-    });
-    let pipe0;
+    let pipe;
     unsafe {
-        pipe0 = PIPE_WIN0.clone();
+        pipe = PIPE.clone();
     }
-    let pipe1;
-    unsafe {
-        pipe1 = PIPE_WIN1.clone();
-    }
-
     // Initialize
-    pipe0.send(WindowCommand::Init()).await;
+    pipe.send(WindowCommand::Init()).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let pgp_handler = PGPEnDeCrypt::new_no_certpass(cert.clone());
@@ -647,6 +589,7 @@ async fn launch_terminal_program(
     let pub_key_userid = pgp_handler.get_userid();
     let pub_key_full = pgp_handler.get_public_key_as_base64();
 
+    /*
     let (max_y, max_x) = WindowManager::get_max_yx();
     let num_windows = 2;
     let win_height = max_y / num_windows as i32;
@@ -666,14 +609,10 @@ async fn launch_terminal_program(
         } else {
             pipe1.send(WindowCommand::New(window_cmd)).await;
         }
-    }
+    }*/
 
     tokio::time::sleep(Duration::from_millis(600)).await;
 
-    let pipe0;
-    unsafe {
-        pipe0 = PIPE_WIN0.clone();
-    }
     // Launch window manager program
     tokio::spawn(async move {
         // Wait for the window manager loops to be set up

@@ -3,14 +3,26 @@ use std::collections::HashMap;
 use std::marker::PhantomData;
 
 use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, Mutex, Semaphore};
 use tokio::time::{timeout, Duration};
+
+use color_eyre::Result;
+use ratatui::{
+    crossterm::event::{self, Event, KeyCode, KeyEventKind},
+    layout::{Constraint, Layout, Position},
+    style::{Color, Modifier, Style, Stylize},
+    text::{Line, Span, Text},
+    widgets::{Block, List, ListItem, Paragraph},
+    DefaultTerminal, Frame,
+};
 
 use serde::{Deserialize, Serialize};
 
 pub struct WindowManager {
     windows: HashMap<usize, (WINDOW, WINDOW)>,
-    keep_running: bool,
+    keep_running: Arc<Mutex<bool>>,
+    pipe: WindowPipe,
+    ratatui_thread: Option<tokio::task::JoinHandle<()>>,
 }
 
 unsafe impl Send for WindowManager {}
@@ -128,7 +140,9 @@ impl WindowPipe {
             None => Err(()),
         }
     }
-
+    pub async fn tx_input(&self, msg: String) {
+        let _ = self.tx_input.lock().await.send(msg).await;
+    }
     pub async fn tx_chat_input(&self, msg: Option<String>) {
         let _ = self.tx_chat_input.lock().await.send(msg).await;
     }
@@ -138,199 +152,423 @@ impl WindowManager {
     pub fn new() -> Self {
         WindowManager {
             windows: HashMap::new(),
-            keep_running: true,
-        }
-    }
-    pub fn init(&self) {
-        // Initialize ncurses
-        initscr();
-        cbreak();
-        noecho();
-        keypad(stdscr(), true); // Enable keypad input
-        refresh(); // Refresh the standard screen to ensure it's initialized
-    }
-    pub fn get_max_yx() -> (i32, i32) {
-        let mut max_y = 0;
-        let mut max_x = 0;
-        getmaxyx(stdscr(), &mut max_y, &mut max_x);
-        (max_y, max_x)
-    }
-    pub fn new_window(
-        &mut self,
-        window_number: usize,
-        win_height: i32,
-        win_width: i32,
-        start_y: i32,
-    ) {
-        let win = newwin(win_height, win_width, start_y, 0);
-        let subwin = derwin(win, win_height - 1, win_width - 1, 1, 1);
-        scrollok(subwin, true); // Enable scrolling for the window
-        wrefresh(win); // Refresh the window to apply the box
-        self.windows.insert(window_number, (win, subwin));
-    }
-
-    // Print a message to a specific window
-    pub fn printw(&self, window_number: usize, message: &str) {
-        if let Some((_win, subwin)) = self.windows.get(&window_number) {
-            // Print the message in the window
-            wprintw(*subwin, message);
-            wrefresh(*subwin); // Refresh the window to display the new content
-            let cur_y = getcury(*subwin);
-            if cur_y + 1 >= getmaxy(*subwin) {
-                // Manually scroll the subwindow if the cursor is at the bottom
-                let diff = getmaxy(*subwin) - (cur_y + 1);
-                wscrl(*subwin, diff);
-                wmove(*subwin, getmaxy(*subwin) - diff, 1); // Move cursor to the start of the new line after scroll
-            }
-        } else {
-            println!(
-                "Window number {} does not exist. '{}'",
-                window_number, message
-            );
-        }
-    }
-    // Print a message to a specific window
-    pub fn clrtoeol(&self, window_number: usize) {
-        if let Some((_win, subwin)) = self.windows.get(&window_number) {
-            wclrtoeol(*subwin);
-        } else {
-            println!("Window number {} does not exist. ", window_number);
+            keep_running: Arc::new(Mutex::new(true)),
+            pipe: WindowPipe::new(),
+            ratatui_thread: None,
         }
     }
 
-    // Make window interactive
-    pub fn getch(
-        &self,
-        window_number: usize,
-        prompt: &str,
-        upper_prompt: &str,
-        wait_time_seconds: i32,
-    ) -> Option<String> {
-        if let Some((_win, subwin)) = self.windows.get(&window_number) {
-            wtimeout(*subwin, wait_time_seconds * 1000);
-            wrefresh(*subwin);
+    pub async fn cleanup(&mut self) {}
 
-            cbreak();
-            echo();
-            curs_set(CURSOR_VISIBILITY::CURSOR_VISIBLE);
-
-            let mut orig_y = 0;
-            let mut orig_x = 0;
-            getyx(*subwin, &mut orig_y, &mut orig_x);
-
-            wmove(*subwin, 0, 0);
-            let mut rows_added = 0;
-            for line in upper_prompt.lines() {
-                wprintw(*subwin, line);
-                wrefresh(*subwin);
-                rows_added += 1;
-                wmove(*subwin, rows_added, 0);
-            }
-
-            if orig_y < rows_added {
-                wmove(*subwin, rows_added, orig_x);
-            } else {
-                wmove(*subwin, orig_y, orig_x);
-            }
-            // Move the cursor to just inside the box, 1 line down, 1 column in
-            if prompt.len() > 0 {
-                self.printw(window_number, prompt);
-                wrefresh(*subwin);
-            }
-            let mut input = Vec::<u8>::new();
-
-            // Handle user input
-            let mut cur_y = 0;
-            let mut cur_x = 0;
-            getyx(*subwin, &mut cur_y, &mut cur_x);
-            let mut ch = wgetch(*subwin);
-            while ch != '\n' as i32 && self.keep_running {
-                if ch == ERR {
-                    wmove(*subwin, cur_y, cur_x);
-                    if input.len() == 0 {
-                        return None;
-                    }
-                } else if ch == KEY_BACKSPACE || ch == 127 {
-                    if !input.is_empty() {
-                        input.pop();
-                        wmove(*subwin, cur_y, cur_x - 1);
-                        self.clrtoeol(window_number);
-                        clrtoeol();
-                    }
-                } else {
-                    input.push(ch as u8);
+    pub async fn init(&mut self) {
+        if self.ratatui_thread.is_none() {
+            let pipe = self.pipe.clone();
+            self.ratatui_thread = Some(tokio::spawn(async move {
+                match color_eyre::install() {
+                    Err(_) => return,
+                    _ => {}
                 }
-                wrefresh(*subwin);
-                getyx(*subwin, &mut cur_y, &mut cur_x);
-                ch = wgetch(*subwin);
-            }
-
-            let utf8 = std::str::from_utf8(input.as_slice());
-            if utf8.is_err() {
-                return None;
-            } else {
-                // Exit condition (optional)
-                let s = utf8.unwrap().to_string().trim().to_string();
-                let cur_y = getcury(*subwin);
-                wmove(*subwin, cur_y + 1, 0);
-                let cur_y = getcury(*subwin);
-                if cur_y >= getmaxy(*subwin) - 2 {
-                    // Manually scroll the subwindow if the cursor is at the bottom
-                    let diff = getmaxy(*subwin) - (cur_y);
-                    wscrl(*subwin, diff);
-                    wmove(*subwin, getmaxy(*subwin) - diff, 0); // Move cursor to the start of the new line after scroll
-                }
-
-                return Some(s);
-            }
-        } else {
-            None
+                let terminal = ratatui::init();
+                let app_result = App::new().await.run(terminal, &pipe).await;
+                ratatui::restore();
+            }));
         }
-    }
-
-    // Clean up ncurses
-    pub fn cleanup(&self) {
-        for (_, (win, subwin)) in &self.windows {
-            delwin(*subwin);
-            delwin(*win);
-        }
-        endwin(); // End ncurses mode
     }
 
     pub async fn serve(&mut self, pipe: WindowPipe) {
-        while self.keep_running {
+        let mut keep_running;
+        {
+            keep_running = *self.keep_running.lock().await;
+        }
+        while keep_running {
             match pipe.read().await {
                 Ok(command) => match command {
-                    WindowCommand::Read(cmd) => {
-                        match self.getch(cmd.window, &cmd.prompt, &cmd.upper_prompt, cmd.timeout) {
-                            Some(input) => {
-                                let _ = pipe.tx_input.lock().await.send(input).await;
-                            }
-                            None => {
-                                let _ = pipe.tx_input.lock().await.send("".to_string()).await;
-                            }
-                        }
-                    }
-                    WindowCommand::Println(cmd) => {
-                        self.printw(cmd.window, &format!("{}\n", cmd.message));
-                    }
-                    WindowCommand::Print(cmd) => {
-                        self.printw(cmd.window, &cmd.message);
-                    }
-                    WindowCommand::New(cmd) => {
-                        self.new_window(cmd.win_number, cmd.win_height, cmd.win_width, cmd.start_y);
-                    }
                     WindowCommand::Init() => {
-                        self.init();
+                        self.init().await;
                     }
                     WindowCommand::Shutdown() => {
-                        self.keep_running = false;
+                        *self.keep_running.lock().await = false;
                     }
-                    _ => {}
+                    _ => {
+                        self.pipe.send(command).await;
+                    }
                 },
                 Err(()) => {}
             }
+            {
+                keep_running = *self.keep_running.lock().await;
+            }
         }
-        self.cleanup();
+        self.cleanup().await;
+    }
+}
+
+/// App holds the state of the application
+struct App {
+    /// Current value of the input box
+    input: Arc<Mutex<String>>,
+    /// Position of cursor in the editor area.
+    character_index: Arc<Mutex<usize>>,
+    /// Current input mode
+    input_mode: Arc<Mutex<InputMode>>,
+    /// History of recorded messages
+    messages_live: Arc<Mutex<HashMap<String, Vec<(usize, String)>>>>,
+
+    should_run: Arc<Mutex<bool>>,
+    notify: Arc<Semaphore>,
+    command: Arc<Mutex<String>>,
+    there_is_command: Arc<Mutex<bool>>,
+}
+
+#[derive(Clone, Copy)]
+enum InputMode {
+    Normal,
+    Editing,
+}
+
+impl App {
+    async fn new() -> Self {
+        Self {
+            input: Arc::new(Mutex::new(String::new())),
+            input_mode: Arc::new(Mutex::new(InputMode::Normal)),
+            command: Arc::new(Mutex::new(String::new())),
+            character_index: Arc::new(Mutex::new(0)),
+            messages_live: Arc::new(Mutex::new(HashMap::new())),
+            should_run: Arc::new(Mutex::new(true)),
+            notify: Arc::new(Semaphore::new(0)),
+            there_is_command: Arc::new(Mutex::new(false)),
+        }
+    }
+
+    fn clone(&self) -> Self {
+        Self {
+            input: self.input.clone(),
+            input_mode: self.input_mode.clone(),
+            character_index: self.character_index.clone(),
+            messages_live: self.messages_live.clone(),
+            should_run: self.should_run.clone(),
+            notify: self.notify.clone(),
+            command: self.command.clone(),
+            there_is_command: self.there_is_command.clone(),
+        }
+    }
+
+    async fn move_cursor_left(&mut self) {
+        let cursor_moved_left = self.character_index.lock().await.saturating_sub(1);
+        *self.character_index.lock().await = self.clamp_cursor(cursor_moved_left).await;
+    }
+
+    async fn move_cursor_right(&mut self) {
+        let cursor_moved_right = self.character_index.lock().await.saturating_add(1);
+        *self.character_index.lock().await = self.clamp_cursor(cursor_moved_right).await;
+    }
+
+    async fn enter_char(&mut self, new_char: char) {
+        let index = self.byte_index().await;
+        self.input.lock().await.insert(index, new_char);
+        self.move_cursor_right().await;
+    }
+
+    /// Returns the byte index based on the character position.
+    ///
+    /// Since each character in a string can be contain multiple bytes, it's necessary to calculate
+    /// the byte index based on the index of the character.
+    async fn byte_index(&self) -> usize {
+        let mut s = self.input.lock().await;
+        let len = s.len();
+        let char_index;
+        {
+            char_index = *self.character_index.lock().await;
+        }
+        s.char_indices()
+            .map(|(i, _)| i)
+            .nth(char_index)
+            .unwrap_or(len)
+    }
+
+    async fn delete_char(&mut self) {
+        let is_not_cursor_leftmost = *self.character_index.lock().await != 0;
+        if is_not_cursor_leftmost {
+            // Method "remove" is not used on the saved text for deleting the selected char.
+            // Reason: Using remove on String works on bytes instead of the chars.
+            // Using remove would require special care because of char boundaries.
+
+            let current_index = *self.character_index.lock().await;
+            let from_left_to_current_index = current_index - 1;
+
+            // Getting all characters before the selected character.
+            let mut input;
+            {
+                input = self.input.lock().await.clone();
+            }
+            let before_char_to_delete = input.chars().take(from_left_to_current_index);
+            // Getting all characters after selected character.
+            let after_char_to_delete = input.chars().skip(current_index);
+
+            // Put all characters together except the selected one.
+            // By leaving the selected one out, it is forgotten and therefore deleted.
+            *self.input.lock().await = before_char_to_delete.chain(after_char_to_delete).collect();
+            self.move_cursor_left().await;
+        }
+    }
+
+    async fn clamp_cursor(&self, new_cursor_pos: usize) -> usize {
+        new_cursor_pos.clamp(0, self.input.lock().await.chars().count())
+    }
+
+    async fn reset_cursor(&mut self) {
+        *self.character_index.lock().await = 0;
+    }
+
+    async fn submit_message(&mut self) {
+        {
+            let s = self.input.lock().await.clone();
+            *self.command.lock().await = s;
+            self.input.lock().await.clear();
+            self.reset_cursor().await;
+            self.set_input_mode(InputMode::Normal).await;
+            *self.there_is_command.lock().await = true;
+        }
+    }
+    async fn await_submit(&self) {
+        let mut keep_waiting;
+        {
+            keep_waiting = !*self.there_is_command.lock().await;
+        }
+        while keep_waiting && self.should_run().await {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            {
+                keep_waiting = !*self.there_is_command.lock().await;
+            }
+        }
+    }
+
+    async fn get_input_mode(&self) -> InputMode {
+        let im = self.input_mode.lock().await;
+        return *im;
+    }
+    async fn set_input_mode(&self, input_mode: InputMode) {
+        *self.input_mode.lock().await = input_mode;
+    }
+    async fn should_run(&self) -> bool {
+        return *self.should_run.lock().await;
+    }
+    async fn set_terminate(&mut self) {
+        *self.should_run.lock().await = false;
+    }
+    async fn get_character_index(&self) -> usize {
+        return *self.character_index.lock().await;
+    }
+    async fn get_input(&self) -> String {
+        let s = self.input.lock().await;
+        s.to_string()
+    }
+    async fn get_submitted(&self) -> String {
+        let s = self.command.lock().await;
+        s.to_string()
+    }
+    async fn write_new_message(&mut self, window: usize, message: String) {
+        let mut messages_live;
+        {
+            messages_live = self.messages_live.clone();
+        }
+        let mut hm = messages_live.lock().await;
+        let entry = (window, message);
+        if let Some(v) = hm.get_mut("messages") {
+            v.push(entry);
+        } else {
+            let mut v = Vec::new();
+            v.push(entry);
+            hm.insert("messages".to_string(), v);
+        }
+    }
+    async fn set_last_message(&mut self, window: usize, message: String) {
+        let mut messages_live;
+        {
+            messages_live = self.messages_live.clone();
+        }
+        let mut hm = messages_live.lock().await;
+        if let Some(v) = hm.get_mut("messages") {
+            if let Some(last) = v.last_mut() {
+                // Append the string `s1` to the String part of the last element
+                last.1.push_str(&message);
+            }
+        } else {
+            let mut v = Vec::new();
+            v.push((window, message));
+            hm.insert("messages".to_string(), v);
+        }
+    }
+
+    async fn run(&mut self, mut terminal: DefaultTerminal, pipe: &WindowPipe) {
+        let pipe = pipe.clone();
+        let mut app = self.clone();
+        let mut messages_live;
+        {
+            messages_live = self.messages_live.clone();
+        }
+        let h2 = tokio::spawn(async move {
+            while app.should_run().await {
+                let len = messages_live.lock().await.len();
+
+                let timeout_duration = Duration::from_secs(1);
+                match timeout(timeout_duration, pipe.read()).await {
+                    Ok(Ok(command)) => match command {
+                        WindowCommand::Print(cmd) => {
+                            app.set_last_message(cmd.window, cmd.message).await;
+                        }
+                        WindowCommand::Println(cmd) => {
+                            app.write_new_message(cmd.window, cmd.message).await;
+                        }
+                        WindowCommand::Read(cmd) => {
+                            app.write_new_message(cmd.window, cmd.prompt).await;
+                            app.await_submit().await;
+                            let s = app.get_submitted().await;
+                            pipe.tx_input(s.clone()).await;
+                            app.set_last_message(cmd.window, s).await;
+                        }
+                        _ => {}
+                    },
+                    Ok(Err(_)) => {
+                        println!("got an error");
+                    }
+                    Err(_) => {}
+                };
+            }
+        });
+        let mut messages_live;
+        {
+            messages_live = self.messages_live.clone();
+        }
+        let mut app = self.clone();
+        let h1 = tokio::spawn(async move {
+            while app.should_run().await {
+                let messages;
+                {
+                    messages = messages_live.lock().await;
+                }
+                let len = messages.len();
+                let input = app.get_input().await;
+                let character_index = app.get_character_index().await;
+                let input_mode = app.get_input_mode().await;
+                let mut v = Vec::<(usize, String)>::new();
+                if let Some(msgs) = messages.get("messages") {
+                    v = msgs.to_vec();
+                }
+                let _ =
+                    terminal.draw(|frame| App::draw(frame, v, input_mode, input, character_index));
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        });
+
+        let mut app = self.clone();
+        let h3 = tokio::spawn(async move {
+            while app.should_run().await {
+                if let Event::Key(key) = event::read().unwrap() {
+                    match app.get_input_mode().await {
+                        InputMode::Normal => match key.code {
+                            KeyCode::Char('e') => {
+                                app.set_input_mode(InputMode::Editing).await;
+                            }
+                            KeyCode::Char('q') => {
+                                app.set_terminate().await;
+                                continue;
+                            }
+                            _ => {}
+                        },
+                        InputMode::Editing if key.kind == KeyEventKind::Press => match key.code {
+                            KeyCode::Enter => app.submit_message().await,
+                            KeyCode::Char(to_insert) => app.enter_char(to_insert).await,
+                            KeyCode::Backspace => app.delete_char().await,
+                            KeyCode::Left => app.move_cursor_left().await,
+                            KeyCode::Right => app.move_cursor_right().await,
+                            KeyCode::Esc => app.set_input_mode(InputMode::Normal).await,
+                            _ => {}
+                        },
+                        InputMode::Editing => {}
+                    }
+                }
+            }
+        });
+
+        h1.await.unwrap();
+        h2.await.unwrap();
+        h3.await.unwrap();
+    }
+
+    fn draw(
+        frame: &mut Frame,
+        messages: Vec<(usize, String)>,
+        input_mode: InputMode,
+        input: String,
+        character_index: usize,
+    ) {
+        let vertical = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Length(3),
+            Constraint::Min(1),
+        ]);
+        let [help_area, input_area, messages_area] = vertical.areas(frame.area());
+        if messages.len() > 0 {
+        } else {
+        }
+        let (msg, style) = match input_mode {
+            InputMode::Normal => (
+                vec![
+                    "Press ".into(),
+                    "q".bold(),
+                    " to exit, ".into(),
+                    "e".bold(),
+                    " to start editing.".bold(),
+                ],
+                Style::default().add_modifier(Modifier::RAPID_BLINK),
+            ),
+            InputMode::Editing => (
+                vec![
+                    "Press ".into(),
+                    "Esc".bold(),
+                    " to stop editing, ".into(),
+                    "Enter".bold(),
+                    " to record the message".into(),
+                ],
+                Style::default(),
+            ),
+        };
+        let text = Text::from(Line::from(msg)).patch_style(style);
+        let help_message = Paragraph::new(text);
+        frame.render_widget(help_message, help_area);
+
+        let input = Paragraph::new(input.as_str())
+            .style(match input_mode {
+                InputMode::Normal => Style::default(),
+                InputMode::Editing => Style::default().fg(Color::Yellow),
+            })
+            .block(Block::bordered().title("Input"));
+        frame.render_widget(input, input_area);
+        match input_mode {
+            // Hide the cursor. `Frame` does this by default, so we don't need to do anything here
+            InputMode::Normal => {}
+
+            // Make the cursor visible and ask ratatui to put it at the specified coordinates after
+            // rendering
+            #[allow(clippy::cast_possible_truncation)]
+            InputMode::Editing => frame.set_cursor_position(Position::new(
+                // Draw the cursor at the current position in the input field.
+                // This position is can be controlled via the left and right arrow key
+                input_area.x + character_index as u16 + 1,
+                // Move one line down, from the border to the input line
+                input_area.y + 1,
+            )),
+        }
+
+        let messages: Vec<ListItem> = messages
+            .iter()
+            .map(|(i, m)| {
+                let content = Line::from(Span::raw(format!("{m}")));
+                ListItem::new(content)
+            })
+            .collect();
+        let messages = List::new(messages).block(Block::bordered().title("Messages"));
+        frame.render_widget(messages, messages_area);
     }
 }
