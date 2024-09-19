@@ -9,6 +9,10 @@ edition = "2021"
 name="client"
 path="./src/client.rs"
 
+[[bin]]
+name="example_ratatui"
+path="./src/example_ratatui.rs"
+
 [dependencies]
 anyhow = "1.0.79"
 base64 = "0.20.0"

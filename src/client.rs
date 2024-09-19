@@ -1,7 +1,6 @@
 #![allow(dead_code)]
 mod session;
 
-use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use session::crypto::{
     ChaCha20Poly1305EnDeCrypt, Cryptical, CrypticalID, PGPEnCryptOwned, PGPEnDeCrypt,
@@ -17,6 +16,7 @@ use std::process::exit;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
+use tokio::sync::OnceCell;
 
 mod util;
 
@@ -33,7 +33,8 @@ use ncurses::*;
 
 mod terminal;
 use terminal::{
-    NewWindowCommand, PrintCommand, ReadCommand, WindowCommand, WindowManager, WindowPipe,
+    read_terminal_input, NewWindowCommand, PrintCommand, ReadCommand, WindowCommand, WindowManager,
+    WindowPipe,
 };
 
 use session::middleware::{ZMQHandler, ZenohHandler};
@@ -64,17 +65,21 @@ struct Cli {
 }
 
 // Create a global instance of WindowManager
-static mut PIPE: Lazy<WindowPipe> = Lazy::new(|| WindowPipe::new());
+static PIPE: OnceCell<WindowPipe<WindowCommand>> = OnceCell::const_new();
 
 async fn println_message(window: usize, message: String) {
     unsafe {
-        PIPE.send(WindowCommand::Println(PrintCommand { window, message }))
+        PIPE.get()
+            .unwrap()
+            .send(WindowCommand::Println(PrintCommand { window, message }))
             .await;
     }
 }
 async fn print_message(window: usize, message: String) {
     unsafe {
-        PIPE.send(WindowCommand::Print(PrintCommand { window, message }))
+        PIPE.get()
+            .unwrap()
+            .send(WindowCommand::Print(PrintCommand { window, message }))
             .await;
     }
 }
@@ -84,22 +89,29 @@ async fn read_message(
     upper_prompt: &str,
     timeout: i32,
 ) -> Result<String, ()> {
-    let mut input = Err(());
+    /*let mut input = Err(());
     unsafe {
-        input = PIPE.get_input(window, prompt, upper_prompt, timeout).await;
+        input = PIPE
+            .get()
+            .unwrap()
+            .get_input(window, prompt, upper_prompt, timeout)
+            .await;
+    }*/
+    if prompt.len() > 0 {
+        print_message(window, prompt.to_string()).await;
     }
-    input
+    read_terminal_input().await
 }
 async fn read_chat_message(window: usize) -> Result<Option<String>, ()> {
     let mut input = Err(());
     unsafe {
-        input = PIPE.get_chat_input().await;
+        //input = PIPE.get().unwrap().get_chat_input().await;
     }
     input
 }
 async fn send_chat_message(window: usize, message: Option<String>) {
     unsafe {
-        PIPE.tx_chat_input(message).await;
+        //PIPE.get().unwrap().tx_chat_input(message).await;
     }
 }
 
@@ -348,7 +360,7 @@ async fn cb_init_incoming(public_key: String) -> bool {
 async fn terminate(session_tx: mpsc::Sender<(String, String)>) {
     let pipe;
     unsafe {
-        pipe = PIPE.clone();
+        pipe = PIPE.get().unwrap().clone();
     }
     let topic = Topic::Internal.as_str();
     let msg = SessionMessage::new_internal(
@@ -432,15 +444,16 @@ async fn terminal_program(
             }
         } else {
             let mut input;
-            println!("reading input....");
             if print_prompt {
-                input = read_message(1, ">> ", &upper_prompt, 1).await;
+                input = read_message(1, "", &upper_prompt, 1).await;
             } else {
                 input = read_message(1, "", &upper_prompt, 1).await;
             }
-            println!("ok read input: {:?}", input);
             if input.is_ok() {
                 let input = input.unwrap();
+                let mut s = ">> ".to_string();
+                s.push_str(&input);
+                println_message(1, s).await;
                 if input.len() > 0 {
                     print_prompt = true;
                 } else {
@@ -567,7 +580,7 @@ async fn launch_terminal_program(
 ) {
     let pipe;
     unsafe {
-        pipe = PIPE.clone();
+        pipe = PIPE.get().unwrap().clone();
     }
     // Setup window manager serving
     tokio::spawn(async move {
@@ -578,7 +591,7 @@ async fn launch_terminal_program(
     });
     let pipe;
     unsafe {
-        pipe = PIPE.clone();
+        pipe = PIPE.get().unwrap().clone();
     }
     // Initialize
     pipe.send(WindowCommand::Init()).await;
@@ -619,6 +632,11 @@ async fn launch_terminal_program(
         tokio::time::sleep(Duration::from_millis(400)).await;
         terminal_program(session_tx, cert, session).await;
     });
+}
+
+async fn initialize_global_value() {
+    // Directly initialize the GLOBAL_VALUE using `init`
+    PIPE.set(WindowPipe::new());
 }
 
 #[tokio::main]
@@ -745,6 +763,14 @@ async fn main() {
     session
         .register_callback_terminate(Box::new(callback_terminate))
         .await;
+
+    // First task to initialize the global value
+    let initializer = tokio::spawn(async {
+        initialize_global_value().await;
+    });
+
+    // Wait for the initializer to complete
+    initializer.await.unwrap();
 
     let tx = session.get_tx().await;
     let tx_clone = tx.clone();

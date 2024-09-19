@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::marker::PhantomData;
 
 use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex, Semaphore};
+use tokio::sync::{mpsc, Mutex, Notify, OnceCell, Semaphore};
 use tokio::time::{timeout, Duration};
 
 use color_eyre::Result;
@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 pub struct WindowManager {
     windows: HashMap<usize, (WINDOW, WINDOW)>,
     keep_running: Arc<Mutex<bool>>,
-    pipe: WindowPipe,
+    pipe: WindowPipe<WindowCommand>,
     ratatui_thread: Option<tokio::task::JoinHandle<()>>,
 }
 
@@ -58,27 +58,18 @@ pub enum WindowCommand {
     Shutdown(),
 }
 
-pub struct WindowPipe {
-    pub tx: Arc<Mutex<mpsc::Sender<WindowCommand>>>,
-    pub rx: Arc<Mutex<mpsc::Receiver<WindowCommand>>>,
-    pub tx_input: Arc<Mutex<mpsc::Sender<String>>>,
-    pub rx_input: Arc<Mutex<mpsc::Receiver<String>>>,
-    pub tx_chat_input: Arc<Mutex<mpsc::Sender<Option<String>>>>,
-    pub rx_chat_input: Arc<Mutex<mpsc::Receiver<Option<String>>>>,
+#[derive(Clone)]
+pub struct WindowPipe<T> {
+    pub tx: Arc<Mutex<mpsc::Sender<T>>>,
+    pub rx: Arc<Mutex<mpsc::Receiver<T>>>,
 }
 
-impl WindowPipe {
+impl<T> WindowPipe<T> {
     pub fn new() -> Self {
         let (tx, rx) = mpsc::channel(50);
-        let (tx_input, rx_input) = mpsc::channel(50);
-        let (tx_chat_input, rx_chat_input) = mpsc::channel(50);
         Self {
             tx: Arc::new(Mutex::new(tx)),
             rx: Arc::new(Mutex::new(rx)),
-            tx_input: Arc::new(Mutex::new(tx_input)),
-            rx_input: Arc::new(Mutex::new(rx_input)),
-            tx_chat_input: Arc::new(Mutex::new(tx_chat_input)),
-            rx_chat_input: Arc::new(Mutex::new(rx_chat_input)),
         }
     }
 
@@ -86,65 +77,18 @@ impl WindowPipe {
         Self {
             tx: self.tx.clone(),
             rx: self.rx.clone(),
-            tx_input: self.tx_input.clone(),
-            rx_input: self.rx_input.clone(),
-            tx_chat_input: self.tx_chat_input.clone(),
-            rx_chat_input: self.rx_chat_input.clone(),
         }
     }
 
-    pub async fn read(&self) -> Result<WindowCommand, ()> {
+    pub async fn read(&self) -> Result<T, ()> {
         match self.rx.lock().await.recv().await {
             Some(msg) => Ok(msg),
             None => Err(()),
         }
     }
 
-    pub async fn send(&self, cmd: WindowCommand) {
+    pub async fn send(&self, cmd: T) {
         let _ = self.tx.lock().await.send(cmd).await;
-    }
-
-    pub async fn get_input(
-        &self,
-        window: usize,
-        prompt: &str,
-        upper_prompt: &str,
-        timeout: i32,
-    ) -> Result<String, ()> {
-        let cmd = ReadCommand {
-            window,
-            prompt: prompt.to_string(),
-            upper_prompt: upper_prompt.to_string(),
-            timeout,
-        };
-        let _ = self.tx.lock().await.send(WindowCommand::Read(cmd)).await;
-        let mut rx;
-        {
-            rx = self.rx_input.lock().await;
-        }
-
-        match rx.recv().await {
-            Some(msg) => Ok(msg),
-            None => Err(()),
-        }
-    }
-
-    pub async fn get_chat_input(&self) -> Result<Option<String>, ()> {
-        let mut rx;
-        {
-            rx = self.rx_chat_input.lock().await;
-        }
-        match rx.recv().await {
-            Some(Some(msg)) => Ok(Some(msg)),
-            Some(None) => Ok(None),
-            None => Err(()),
-        }
-    }
-    pub async fn tx_input(&self, msg: String) {
-        let _ = self.tx_input.lock().await.send(msg).await;
-    }
-    pub async fn tx_chat_input(&self, msg: Option<String>) {
-        let _ = self.tx_chat_input.lock().await.send(msg).await;
     }
 }
 
@@ -175,7 +119,7 @@ impl WindowManager {
         }
     }
 
-    pub async fn serve(&mut self, pipe: WindowPipe) {
+    pub async fn serve(&mut self, pipe: WindowPipe<WindowCommand>) {
         let mut keep_running;
         {
             keep_running = *self.keep_running.lock().await;
@@ -203,21 +147,18 @@ impl WindowManager {
     }
 }
 
+#[derive(Clone)]
+struct AppState {
+    pub input: String,
+    pub input_mode: InputMode,
+    pub character_index: usize,
+    pub messages: Vec<String>,
+}
+
 /// App holds the state of the application
 struct App {
-    /// Current value of the input box
-    input: Arc<Mutex<String>>,
-    /// Position of cursor in the editor area.
-    character_index: Arc<Mutex<usize>>,
-    /// Current input mode
-    input_mode: Arc<Mutex<InputMode>>,
-    /// History of recorded messages
-    messages_live: Arc<Mutex<HashMap<String, Vec<(usize, String)>>>>,
-
+    state: Arc<Mutex<AppState>>,
     should_run: Arc<Mutex<bool>>,
-    notify: Arc<Semaphore>,
-    command: Arc<Mutex<String>>,
-    there_is_command: Arc<Mutex<bool>>,
 }
 
 #[derive(Clone, Copy)]
@@ -229,56 +170,51 @@ enum InputMode {
 impl App {
     async fn new() -> Self {
         Self {
-            input: Arc::new(Mutex::new(String::new())),
-            input_mode: Arc::new(Mutex::new(InputMode::Normal)),
-            command: Arc::new(Mutex::new(String::new())),
-            character_index: Arc::new(Mutex::new(0)),
-            messages_live: Arc::new(Mutex::new(HashMap::new())),
+            state: Arc::new(Mutex::new(AppState {
+                input: String::new(),
+                input_mode: InputMode::Normal,
+                character_index: 0,
+                messages: Vec::new(),
+            })),
             should_run: Arc::new(Mutex::new(true)),
-            notify: Arc::new(Semaphore::new(0)),
-            there_is_command: Arc::new(Mutex::new(false)),
         }
     }
 
     fn clone(&self) -> Self {
         Self {
-            input: self.input.clone(),
-            input_mode: self.input_mode.clone(),
-            character_index: self.character_index.clone(),
-            messages_live: self.messages_live.clone(),
+            state: self.state.clone(),
             should_run: self.should_run.clone(),
-            notify: self.notify.clone(),
-            command: self.command.clone(),
-            there_is_command: self.there_is_command.clone(),
         }
     }
 
-    async fn move_cursor_left(&mut self) {
-        let cursor_moved_left = self.character_index.lock().await.saturating_sub(1);
-        *self.character_index.lock().await = self.clamp_cursor(cursor_moved_left).await;
+    async fn move_cursor_left(&mut self, len: usize) {
+        let mut state = self.state.lock().await;
+        let cursor_moved_left = state.character_index.saturating_sub(1);
+        state.character_index = self.clamp_cursor(cursor_moved_left, len).await;
     }
 
-    async fn move_cursor_right(&mut self) {
-        let cursor_moved_right = self.character_index.lock().await.saturating_add(1);
-        *self.character_index.lock().await = self.clamp_cursor(cursor_moved_right).await;
+    async fn move_cursor_right(&mut self, len: usize) {
+        let mut state = self.state.lock().await;
+        let cursor_moved_right = state.character_index.saturating_add(1);
+        state.character_index = self.clamp_cursor(cursor_moved_right, len).await;
     }
 
     async fn enter_char(&mut self, new_char: char) {
         let index = self.byte_index().await;
-        self.input.lock().await.insert(index, new_char);
-        self.move_cursor_right().await;
+        {
+            let mut state = self.state.lock().await;
+            state.input.insert(index, new_char);
+        }
+        self.move_cursor_right(index + 1).await;
     }
 
-    /// Returns the byte index based on the character position.
-    ///
-    /// Since each character in a string can be contain multiple bytes, it's necessary to calculate
-    /// the byte index based on the index of the character.
     async fn byte_index(&self) -> usize {
-        let mut s = self.input.lock().await;
+        let state = self.state.lock().await;
+        let mut s = &state.input;
         let len = s.len();
         let char_index;
         {
-            char_index = *self.character_index.lock().await;
+            char_index = state.character_index;
         }
         s.char_indices()
             .map(|(i, _)| i)
@@ -287,68 +223,78 @@ impl App {
     }
 
     async fn delete_char(&mut self) {
-        let is_not_cursor_leftmost = *self.character_index.lock().await != 0;
-        if is_not_cursor_leftmost {
-            // Method "remove" is not used on the saved text for deleting the selected char.
-            // Reason: Using remove on String works on bytes instead of the chars.
-            // Using remove would require special care because of char boundaries.
-
-            let current_index = *self.character_index.lock().await;
-            let from_left_to_current_index = current_index - 1;
-
-            // Getting all characters before the selected character.
-            let mut input;
+        let mut len = None;
+        {
+            let mut state = self.state.lock().await;
+            let is_not_cursor_leftmost;
             {
-                input = self.input.lock().await.clone();
-            }
-            let before_char_to_delete = input.chars().take(from_left_to_current_index);
-            // Getting all characters after selected character.
-            let after_char_to_delete = input.chars().skip(current_index);
+                is_not_cursor_leftmost = state.character_index != 0
+            };
+            if is_not_cursor_leftmost {
+                // Method "remove" is not used on the saved text for deleting the selected char.
+                // Reason: Using remove on String works on bytes instead of the chars.
+                // Using remove would require special care because of char boundaries.
 
-            // Put all characters together except the selected one.
-            // By leaving the selected one out, it is forgotten and therefore deleted.
-            *self.input.lock().await = before_char_to_delete.chain(after_char_to_delete).collect();
-            self.move_cursor_left().await;
+                let current_index;
+                {
+                    current_index = state.character_index;
+                }
+                let from_left_to_current_index = current_index - 1;
+
+                // Getting all characters before the selected character.
+                let mut input;
+                {
+                    input = state.input.clone();
+                }
+                len = Some(input.len());
+                let before_char_to_delete = input.chars().take(from_left_to_current_index);
+                // Getting all characters after selected character.
+                let after_char_to_delete = input.chars().skip(current_index);
+
+                // Put all characters together except the selected one.
+                // By leaving the selected one out, it is forgotten and therefore deleted.
+                {
+                    state.input = before_char_to_delete.chain(after_char_to_delete).collect();
+                }
+            }
+        }
+        if len.is_some() {
+            self.move_cursor_left(len.unwrap()).await;
         }
     }
-
-    async fn clamp_cursor(&self, new_cursor_pos: usize) -> usize {
-        new_cursor_pos.clamp(0, self.input.lock().await.chars().count())
+    //self.input.lock().await.chars().count()
+    async fn clamp_cursor(&self, new_cursor_pos: usize, len: usize) -> usize {
+        new_cursor_pos.clamp(0, len)
     }
 
     async fn reset_cursor(&mut self) {
-        *self.character_index.lock().await = 0;
+        let mut state = self.state.lock().await;
+        state.character_index = 0;
     }
 
     async fn submit_message(&mut self) {
+        let input;
         {
-            let s = self.input.lock().await.clone();
-            *self.command.lock().await = s;
-            self.input.lock().await.clear();
-            self.reset_cursor().await;
-            self.set_input_mode(InputMode::Normal).await;
-            *self.there_is_command.lock().await = true;
+            let mut state = self.state.lock().await;
+            input = state.input.clone();
+            state.input = String::new();
         }
-    }
-    async fn await_submit(&self) {
-        let mut keep_waiting;
-        {
-            keep_waiting = !*self.there_is_command.lock().await;
-        }
-        while keep_waiting && self.should_run().await {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            {
-                keep_waiting = !*self.there_is_command.lock().await;
-            }
-        }
+        self.reset_cursor().await;
+        self.set_input_mode(InputMode::Normal).await;
+        send_terminal_input(input).await;
     }
 
     async fn get_input_mode(&self) -> InputMode {
-        let im = self.input_mode.lock().await;
-        return *im;
+        let state = self.state.lock().await;
+        return state.input_mode;
+    }
+    async fn get_state(&self) -> AppState {
+        let state = self.state.lock().await;
+        state.clone()
     }
     async fn set_input_mode(&self, input_mode: InputMode) {
-        *self.input_mode.lock().await = input_mode;
+        let mut state = self.state.lock().await;
+        state.input_mode = input_mode;
     }
     async fn should_run(&self) -> bool {
         return *self.should_run.lock().await;
@@ -357,136 +303,164 @@ impl App {
         *self.should_run.lock().await = false;
     }
     async fn get_character_index(&self) -> usize {
-        return *self.character_index.lock().await;
+        let state = self.state.lock().await;
+        state.character_index
     }
     async fn get_input(&self) -> String {
-        let s = self.input.lock().await;
-        s.to_string()
+        let state = self.state.lock().await;
+        state.input.clone()
     }
-    async fn get_submitted(&self) -> String {
-        let s = self.command.lock().await;
-        s.to_string()
+    async fn get_input_len(&self) -> usize {
+        let state = self.state.lock().await;
+        state.input.chars().count()
     }
     async fn write_new_message(&mut self, window: usize, message: String) {
-        let mut messages_live;
-        {
-            messages_live = self.messages_live.clone();
-        }
-        let mut hm = messages_live.lock().await;
-        let entry = (window, message);
-        if let Some(v) = hm.get_mut("messages") {
-            v.push(entry);
-        } else {
-            let mut v = Vec::new();
-            v.push(entry);
-            hm.insert("messages".to_string(), v);
-        }
+        let mut state = self.state.lock().await;
+        state.messages.push(message);
     }
     async fn set_last_message(&mut self, window: usize, message: String) {
-        let mut messages_live;
-        {
-            messages_live = self.messages_live.clone();
-        }
-        let mut hm = messages_live.lock().await;
-        if let Some(v) = hm.get_mut("messages") {
-            if let Some(last) = v.last_mut() {
+        let mut state = self.state.lock().await;
+        if state.messages.len() > 0 {
+            if let Some(last) = state.messages.last_mut() {
                 // Append the string `s1` to the String part of the last element
-                last.1.push_str(&message);
+                last.push_str(&message);
             }
         } else {
-            let mut v = Vec::new();
-            v.push((window, message));
-            hm.insert("messages".to_string(), v);
+            state.messages.push(message);
         }
     }
 
-    async fn run(&mut self, mut terminal: DefaultTerminal, pipe: &WindowPipe) {
+    async fn run(&mut self, mut terminal: DefaultTerminal, pipe: &WindowPipe<WindowCommand>) {
         let pipe = pipe.clone();
         let mut app = self.clone();
-        let mut messages_live;
-        {
-            messages_live = self.messages_live.clone();
-        }
-        let h2 = tokio::spawn(async move {
-            while app.should_run().await {
-                let len = messages_live.lock().await.len();
 
-                let timeout_duration = Duration::from_secs(1);
+        // First task to initialize the global value
+        let initializer = tokio::spawn(async {
+            initialize_global_values().await;
+        });
+
+        // Wait for the initializer to complete
+        initializer.await.unwrap();
+
+        let h2 = tokio::spawn(async move {
+            let mut should_run;
+            {
+                should_run = app.should_run().await;
+            }
+            while should_run {
+                let timeout_duration = Duration::from_millis(100);
                 match timeout(timeout_duration, pipe.read()).await {
-                    Ok(Ok(command)) => match command {
-                        WindowCommand::Print(cmd) => {
-                            app.set_last_message(cmd.window, cmd.message).await;
-                        }
-                        WindowCommand::Println(cmd) => {
-                            app.write_new_message(cmd.window, cmd.message).await;
-                        }
-                        WindowCommand::Read(cmd) => {
-                            app.write_new_message(cmd.window, cmd.prompt).await;
-                            app.await_submit().await;
-                            let s = app.get_submitted().await;
-                            pipe.tx_input(s.clone()).await;
-                            app.set_last_message(cmd.window, s).await;
-                        }
-                        _ => {}
-                    },
+                    Ok(Ok(command)) => {
+                        match command {
+                            WindowCommand::Print(cmd) => {
+                                app.set_last_message(cmd.window, cmd.message).await;
+                            }
+                            WindowCommand::Println(cmd) => {
+                                app.write_new_message(cmd.window, cmd.message).await;
+                            }
+                            /*WindowCommand::Read(cmd) => {
+                                app.write_new_message(cmd.window, cmd.prompt).await;
+                                app.await_submit().await;
+                                let s = app.get_submitted().await;
+                                //send_terminal_input(s.clone()).await;
+                                //pipe.tx_input(s.clone()).await;
+                                app.set_last_message(cmd.window, s).await;
+                            }*/
+                            _ => {}
+                        };
+                        // let state = app.get_state().await;
+                        // send_app_state(state).await;
+                    }
                     Ok(Err(_)) => {
                         println!("got an error");
                     }
                     Err(_) => {}
                 };
+                {
+                    should_run = app.should_run().await;
+                }
+
+                send_app_state(app.get_state().await).await;
             }
         });
-        let mut messages_live;
-        {
-            messages_live = self.messages_live.clone();
-        }
         let mut app = self.clone();
         let h1 = tokio::spawn(async move {
-            while app.should_run().await {
-                let messages;
+            let mut should_run;
+            {
+                should_run = app.should_run().await;
+            }
+            while should_run {
+                let state = read_app_state().await.unwrap();
+                let messages = state.messages;
+                let input = state.input;
+                let input_mode = state.input_mode;
+                let character_index = state.character_index;
+                let _ = terminal
+                    .draw(|frame| App::draw(frame, messages, input_mode, input, character_index));
                 {
-                    messages = messages_live.lock().await;
+                    should_run = app.should_run().await;
                 }
-                let len = messages.len();
-                let input = app.get_input().await;
-                let character_index = app.get_character_index().await;
-                let input_mode = app.get_input_mode().await;
-                let mut v = Vec::<(usize, String)>::new();
-                if let Some(msgs) = messages.get("messages") {
-                    v = msgs.to_vec();
+            }
+        });
+
+        let app = self.clone();
+        tokio::spawn(async move {
+            let mut should_run;
+            {
+                should_run = app.should_run().await;
+            }
+            let update_interval_millis = 100;
+            while should_run {
+                send_app_state(app.get_state().await).await;
+                tokio::time::sleep(Duration::from_millis(update_interval_millis)).await;
+                {
+                    should_run = app.should_run().await;
                 }
-                let _ =
-                    terminal.draw(|frame| App::draw(frame, v, input_mode, input, character_index));
-                tokio::time::sleep(Duration::from_millis(100)).await;
             }
         });
 
         let mut app = self.clone();
         let h3 = tokio::spawn(async move {
-            while app.should_run().await {
+            let mut should_run;
+            {
+                should_run = app.should_run().await;
+            }
+            while should_run {
                 if let Event::Key(key) = event::read().unwrap() {
-                    match app.get_input_mode().await {
+                    let input_mode;
+                    {
+                        input_mode = app.get_input_mode().await;
+                    }
+                    match input_mode {
                         InputMode::Normal => match key.code {
                             KeyCode::Char('e') => {
                                 app.set_input_mode(InputMode::Editing).await;
                             }
                             KeyCode::Char('q') => {
                                 app.set_terminate().await;
-                                continue;
                             }
                             _ => {}
                         },
-                        InputMode::Editing if key.kind == KeyEventKind::Press => match key.code {
-                            KeyCode::Enter => app.submit_message().await,
-                            KeyCode::Char(to_insert) => app.enter_char(to_insert).await,
-                            KeyCode::Backspace => app.delete_char().await,
-                            KeyCode::Left => app.move_cursor_left().await,
-                            KeyCode::Right => app.move_cursor_right().await,
-                            KeyCode::Esc => app.set_input_mode(InputMode::Normal).await,
-                            _ => {}
-                        },
+                        InputMode::Editing if key.kind == KeyEventKind::Press => {
+                            let len = app.get_input_len().await;
+                            match key.code {
+                                KeyCode::Enter => app.submit_message().await,
+                                KeyCode::Char(to_insert) => app.enter_char(to_insert).await,
+                                KeyCode::Backspace => app.delete_char().await,
+                                KeyCode::Left => app.move_cursor_left(len).await,
+                                KeyCode::Right => app.move_cursor_right(len).await,
+                                KeyCode::Esc => app.set_input_mode(InputMode::Normal).await,
+                                _ => {}
+                            }
+                        }
                         InputMode::Editing => {}
                     }
+                }
+                {
+                    //send_app_state(app.get_state().await).await;
+                }
+                {
+                    should_run = app.should_run().await;
                 }
             }
         });
@@ -498,7 +472,7 @@ impl App {
 
     fn draw(
         frame: &mut Frame,
-        messages: Vec<(usize, String)>,
+        messages: Vec<String>,
         input_mode: InputMode,
         input: String,
         character_index: usize,
@@ -563,7 +537,7 @@ impl App {
 
         let messages: Vec<ListItem> = messages
             .iter()
-            .map(|(i, m)| {
+            .map(|m| {
                 let content = Line::from(Span::raw(format!("{m}")));
                 ListItem::new(content)
             })
@@ -571,4 +545,35 @@ impl App {
         let messages = List::new(messages).block(Block::bordered().title("Messages"));
         frame.render_widget(messages, messages_area);
     }
+}
+
+static PIPE: OnceCell<Arc<WindowPipe<String>>> = OnceCell::const_new();
+static STATE: OnceCell<Arc<WindowPipe<AppState>>> = OnceCell::const_new();
+
+async fn initialize_global_values() {
+    // Directly initialize the GLOBAL_VALUE using `init`
+    let _ = PIPE.set(Arc::new(WindowPipe::<String>::new()));
+    let _ = STATE.set(Arc::new(WindowPipe::<AppState>::new()));
+}
+
+pub async fn read_terminal_input() -> Result<String, ()> {
+    match PIPE.get().unwrap().read().await {
+        Ok(cmd) => Ok(cmd),
+        Err(_) => Err(()),
+    }
+}
+
+async fn send_terminal_input(message: String) {
+    let _ = PIPE.get().unwrap().send(message).await;
+}
+
+pub async fn read_app_state() -> Result<AppState, ()> {
+    match STATE.get().unwrap().read().await {
+        Ok(cmd) => Ok(cmd),
+        Err(_) => Err(()),
+    }
+}
+
+async fn send_app_state(state: AppState) {
+    let _ = STATE.get().unwrap().send(state).await;
 }
