@@ -175,18 +175,23 @@ impl InputCommand {
     fn get_small_help() -> String {
         "Type !exit to exit and !help for more commands.".to_string()
     }
-    async fn read_yes_or_no(window: usize, prompt: &str) -> Result<bool, ()> {
-        let input = read_message(window, prompt, "", 60).await;
-        match input {
-            Ok(input) => {
+    async fn read_yes_or_no(
+        window: usize,
+        prompt: &str,
+        rx: &mut mpsc::Receiver<Option<String>>,
+    ) -> Result<bool, ()> {
+        println_message_str(1, prompt).await;
+        let input = rx.recv().await;
+        if input.is_some() {
+            let input = input.unwrap();
+            if input.is_some() {
+                let input = input.unwrap();
                 if input.to_lowercase().starts_with('y') {
-                    Ok(true)
-                } else {
-                    Ok(false)
+                    return Ok(true);
                 }
             }
-            Err(_) => Err(()),
         }
+        Ok(true)
     }
 }
 
@@ -231,7 +236,6 @@ async fn cb_chat_input(
 ) -> Option<(String, String)> {
     let prompt = ">> ".to_string();
     let mut input = read_chat_message(1).await;
-    println!("READ INPUT: {:?}", input);
     if input.is_err() {
         return None;
     }
@@ -444,7 +448,7 @@ async fn launch_terminal_program(
                         .await;
                         println_message_str(1, "-- Do you want to chat with this peer? [y/n]")
                             .await;
-                        let r = InputCommand::read_yes_or_no(1, ">> ").await;
+                        let r = InputCommand::read_yes_or_no(1, ">> ", &mut rx).await;
                         if r.is_ok() && r.unwrap() {
                             let _ = session.accept_pending_request(&session_id).await;
                             println_message_str(1, "-- Accepted this chat request.").await;
@@ -484,7 +488,6 @@ async fn launch_terminal_program(
                     continue;
                 }
                 let input = input.unwrap();
-                println!("READ: {}", input);
                 let mut s = ">> ".to_string();
                 s.push_str(&input);
                 println_message(1, s).await;
@@ -548,7 +551,7 @@ async fn launch_terminal_program(
                                 ),
                             )
                             .await;
-                            let response = InputCommand::read_yes_or_no(1, ">> ").await;
+                            let response = InputCommand::read_yes_or_no(1, ">> ", &mut rx).await;
                             if response.is_err() {
                             } else {
                                 let go_further = response.unwrap();

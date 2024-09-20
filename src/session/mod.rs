@@ -160,7 +160,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
             callbacks_terminate: Arc::new(Mutex::new(Vec::new())),
             callbacks_chat_input: Arc::new(Mutex::new(Vec::new())),
             middleware_config,
-            discovery_interval_seconds: 2,
+            discovery_interval_seconds: 10,
             running: Arc::new(Mutex::new(true)),
         }
     }
