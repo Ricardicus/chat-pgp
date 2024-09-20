@@ -33,8 +33,7 @@ use ncurses::*;
 
 mod terminal;
 use terminal::{
-    read_terminal_input, NewWindowCommand, PrintCommand, ReadCommand, WindowCommand, WindowManager,
-    WindowPipe,
+    NewWindowCommand, PrintCommand, ReadCommand, WindowCommand, WindowManager, WindowPipe,
 };
 
 use session::middleware::{ZMQHandler, ZenohHandler};
@@ -89,18 +88,7 @@ async fn read_message(
     upper_prompt: &str,
     timeout: i32,
 ) -> Result<String, ()> {
-    /*let mut input = Err(());
-    unsafe {
-        input = PIPE
-            .get()
-            .unwrap()
-            .get_input(window, prompt, upper_prompt, timeout)
-            .await;
-    }*/
-    if prompt.len() > 0 {
-        print_message(window, prompt.to_string()).await;
-    }
-    read_terminal_input().await
+    Ok("".to_string())
 }
 async fn read_chat_message(window: usize) -> Result<Option<String>, ()> {
     let mut input = Err(());
@@ -382,6 +370,43 @@ async fn terminal_program(
     cert: Arc<Cert>,
     mut session: Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt>,
 ) {
+}
+
+async fn launch_terminal_program(
+    cert: Arc<Cert>,
+    session_tx: mpsc::Sender<(String, String)>,
+    mut session: Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt>,
+) {
+    let pipe;
+    unsafe {
+        pipe = PIPE.get().unwrap().clone();
+    }
+    let (tx, mut rx) = mpsc::channel::<Option<String>>(100);
+    // Setup window manager serving
+    tokio::spawn(async move {
+        let mut window_manager = WindowManager::new();
+
+        let pipe_clone = pipe.clone();
+        window_manager.serve(pipe_clone, tx).await;
+    });
+    let pipe;
+    unsafe {
+        pipe = PIPE.get().unwrap().clone();
+    }
+    // Initialize
+    pipe.send(WindowCommand::Init()).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let pgp_handler = PGPEnDeCrypt::new_no_certpass(cert.clone());
+    let pub_key_fingerprint = pgp_handler.get_public_key_fingerprint();
+    let pub_key_userid = pgp_handler.get_userid();
+    let pub_key_full = pgp_handler.get_public_key_as_base64();
+
+    tokio::time::sleep(Duration::from_millis(600)).await;
+
+    // Launch window manager program
+
+    tokio::time::sleep(Duration::from_millis(400)).await;
     let mut userid = String::new();
     for uid in cert.userids() {
         userid.push_str(&uid.userid().to_string());
@@ -444,13 +469,22 @@ async fn terminal_program(
             }
         } else {
             let mut input;
-            if print_prompt {
+            /*if print_prompt {
                 input = read_message(1, "", &upper_prompt, 1).await;
             } else {
                 input = read_message(1, "", &upper_prompt, 1).await;
-            }
-            if input.is_ok() {
+            }*/
+            input = rx.recv().await;
+            if input.is_some() {
                 let input = input.unwrap();
+                if input.is_none() {
+                    // terminate
+                    terminate(session.get_tx().await).await;
+                    keep_running = false;
+                    continue;
+                }
+                let input = input.unwrap();
+                println!("READ: {}", input);
                 let mut s = ">> ".to_string();
                 s.push_str(&input);
                 println_message(1, s).await;
@@ -472,6 +506,7 @@ async fn terminal_program(
                             )
                             .await;
                         } else {
+                            println_message_str(1, "Peers detected:").await;
                             for peer in discovered {
                                 let peer_decoded = base64::decode(&peer).unwrap();
                                 let peer_cert = read_from_vec(&peer_decoded).unwrap();
@@ -571,67 +606,6 @@ async fn terminal_program(
             }
         }
     }
-}
-
-async fn launch_terminal_program(
-    cert: Arc<Cert>,
-    session_tx: mpsc::Sender<(String, String)>,
-    session: Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt>,
-) {
-    let pipe;
-    unsafe {
-        pipe = PIPE.get().unwrap().clone();
-    }
-    // Setup window manager serving
-    tokio::spawn(async move {
-        let mut window_manager = WindowManager::new();
-
-        let pipe_clone = pipe.clone();
-        window_manager.serve(pipe_clone).await;
-    });
-    let pipe;
-    unsafe {
-        pipe = PIPE.get().unwrap().clone();
-    }
-    // Initialize
-    pipe.send(WindowCommand::Init()).await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    let pgp_handler = PGPEnDeCrypt::new_no_certpass(cert.clone());
-    let pub_key_fingerprint = pgp_handler.get_public_key_fingerprint();
-    let pub_key_userid = pgp_handler.get_userid();
-    let pub_key_full = pgp_handler.get_public_key_as_base64();
-
-    /*
-    let (max_y, max_x) = WindowManager::get_max_yx();
-    let num_windows = 2;
-    let win_height = max_y / num_windows as i32;
-    let win_width = max_x;
-
-    // Create the windows
-    for i in 0..num_windows {
-        let start_y = i * win_height;
-        let window_cmd = NewWindowCommand {
-            win_number: i as usize,
-            start_y,
-            win_height,
-            win_width,
-        };
-        if i == 0 {
-            pipe0.send(WindowCommand::New(window_cmd)).await;
-        } else {
-            pipe1.send(WindowCommand::New(window_cmd)).await;
-        }
-    }*/
-
-    tokio::time::sleep(Duration::from_millis(600)).await;
-
-    // Launch window manager program
-    tokio::spawn(async move {
-        // Wait for the window manager loops to be set up
-        tokio::time::sleep(Duration::from_millis(400)).await;
-        terminal_program(session_tx, cert, session).await;
-    });
 }
 
 async fn initialize_global_value() {
@@ -781,24 +755,30 @@ async fn main() {
         }
     });
 
-    launch_terminal_program(cert.clone(), session.get_tx().await, session.clone()).await;
+    //tokio::spawn(async move {
 
-    tokio::time::sleep(Duration::from_millis(400)).await;
-    match session.serve().await {
-        Ok(_) => {}
-        Err(e) => match e {
-            MessagingError::ZenohError => {
-                terminate(tx).await;
-                println!("Something went wrong with the communication protocol. Check the configuration from Zenoh.");
-                println!("Review your Zenoh configuration file '{}':", zenoh_config);
-                let contents = fs::read_to_string(zenoh_config)
-                    .expect("Something went wrong reading the file");
-                println!("{}", contents);
-                println!(
-                    "Are you perhaps offline, or trying to reach a non-existing Zenoh router?"
-                );
-            }
-            _ => {}
-        },
-    }
+    //});
+
+    let mut session_clone = session.clone();
+    tokio::spawn(async move {
+        let _ = match session_clone.serve().await {
+            Ok(_) => {}
+            Err(e) => match e {
+                MessagingError::ZenohError => {
+                    terminate(tx).await;
+                    println!("Something went wrong with the communication protocol. Check the configuration from Zenoh.");
+                    println!("Review your Zenoh configuration file '{}':", zenoh_config);
+                    let contents = fs::read_to_string(zenoh_config)
+                        .expect("Something went wrong reading the file");
+                    println!("{}", contents);
+                    println!(
+                        "Are you perhaps offline, or trying to reach a non-existing Zenoh router?"
+                    );
+                }
+                _ => {}
+            },
+        };
+    });
+
+    launch_terminal_program(cert.clone(), session.get_tx().await, session.clone()).await;
 }

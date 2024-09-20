@@ -104,7 +104,7 @@ impl WindowManager {
 
     pub async fn cleanup(&mut self) {}
 
-    pub async fn init(&mut self) {
+    pub async fn init(&mut self, tx: mpsc::Sender<Option<String>>) {
         if self.ratatui_thread.is_none() {
             let pipe = self.pipe.clone();
             self.ratatui_thread = Some(tokio::spawn(async move {
@@ -113,13 +113,17 @@ impl WindowManager {
                     _ => {}
                 }
                 let terminal = ratatui::init();
-                let app_result = App::new().await.run(terminal, &pipe).await;
+                let _ = App::new(tx.clone()).await.run(terminal, &pipe).await;
                 ratatui::restore();
             }));
         }
     }
 
-    pub async fn serve(&mut self, pipe: WindowPipe<WindowCommand>) {
+    pub async fn serve(
+        &mut self,
+        pipe: WindowPipe<WindowCommand>,
+        tx_terminal: mpsc::Sender<Option<String>>,
+    ) {
         let mut keep_running;
         {
             keep_running = *self.keep_running.lock().await;
@@ -128,7 +132,7 @@ impl WindowManager {
             match pipe.read().await {
                 Ok(command) => match command {
                     WindowCommand::Init() => {
-                        self.init().await;
+                        self.init(tx_terminal.clone()).await;
                     }
                     WindowCommand::Shutdown() => {
                         *self.keep_running.lock().await = false;
@@ -159,6 +163,7 @@ struct AppState {
 struct App {
     state: Arc<Mutex<AppState>>,
     should_run: Arc<Mutex<bool>>,
+    tx: mpsc::Sender<Option<String>>,
 }
 
 #[derive(Clone, Copy)]
@@ -168,7 +173,7 @@ enum InputMode {
 }
 
 impl App {
-    async fn new() -> Self {
+    async fn new(tx: mpsc::Sender<Option<String>>) -> Self {
         Self {
             state: Arc::new(Mutex::new(AppState {
                 input: String::new(),
@@ -177,6 +182,7 @@ impl App {
                 messages: Vec::new(),
             })),
             should_run: Arc::new(Mutex::new(true)),
+            tx: tx,
         }
     }
 
@@ -184,6 +190,7 @@ impl App {
         Self {
             state: self.state.clone(),
             should_run: self.should_run.clone(),
+            tx: self.tx.clone(),
         }
     }
 
@@ -281,7 +288,7 @@ impl App {
         }
         self.reset_cursor().await;
         self.set_input_mode(InputMode::Normal).await;
-        send_terminal_input(input).await;
+        self.tx.send(Some(input)).await;
     }
 
     async fn get_input_mode(&self) -> InputMode {
@@ -420,6 +427,7 @@ impl App {
         });
 
         let mut app = self.clone();
+        let tx = self.tx.clone();
         let h3 = tokio::spawn(async move {
             let mut should_run;
             {
@@ -438,6 +446,7 @@ impl App {
                             }
                             KeyCode::Char('q') => {
                                 app.set_terminate().await;
+                                let _ = tx.send(None).await;
                             }
                             _ => {}
                         },
@@ -547,24 +556,11 @@ impl App {
     }
 }
 
-static PIPE: OnceCell<Arc<WindowPipe<String>>> = OnceCell::const_new();
 static STATE: OnceCell<Arc<WindowPipe<AppState>>> = OnceCell::const_new();
 
 async fn initialize_global_values() {
     // Directly initialize the GLOBAL_VALUE using `init`
-    let _ = PIPE.set(Arc::new(WindowPipe::<String>::new()));
     let _ = STATE.set(Arc::new(WindowPipe::<AppState>::new()));
-}
-
-pub async fn read_terminal_input() -> Result<String, ()> {
-    match PIPE.get().unwrap().read().await {
-        Ok(cmd) => Ok(cmd),
-        Err(_) => Err(()),
-    }
-}
-
-async fn send_terminal_input(message: String) {
-    let _ = PIPE.get().unwrap().send(message).await;
 }
 
 pub async fn read_app_state() -> Result<AppState, ()> {
