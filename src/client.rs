@@ -14,9 +14,9 @@ use std::io;
 use std::pin::Pin;
 use std::process::exit;
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::sync::OnceCell;
+use tokio::time::{timeout, Duration};
 
 mod util;
 
@@ -402,14 +402,8 @@ async fn launch_terminal_program(
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let pgp_handler = PGPEnDeCrypt::new_no_certpass(cert.clone());
-    let pub_key_fingerprint = pgp_handler.get_public_key_fingerprint();
-    let pub_key_userid = pgp_handler.get_userid();
-    let pub_key_full = pgp_handler.get_public_key_as_base64();
-
-    tokio::time::sleep(Duration::from_millis(600)).await;
 
     // Launch window manager program
-
     tokio::time::sleep(Duration::from_millis(400)).await;
     let mut userid = String::new();
     for uid in cert.userids() {
@@ -472,13 +466,17 @@ async fn launch_terminal_program(
                 }
             }
         } else {
-            let mut input;
             /*if print_prompt {
                 input = read_message(1, "", &upper_prompt, 1).await;
             } else {
                 input = read_message(1, "", &upper_prompt, 1).await;
             }*/
-            input = rx.recv().await;
+            let timeout_duration = Duration::from_secs(1);
+            let input = timeout(timeout_duration, rx.recv()).await;
+            if input.is_err() {
+                continue;
+            }
+            let input = input.unwrap();
             if input.is_some() {
                 let input = input.unwrap();
                 if input.is_none() {
