@@ -34,6 +34,10 @@ pub struct PrintCommand {
     pub message: String,
 }
 #[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct PrintChatCommand {
+    pub message: String,
+}
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ReadCommand {
     pub window: usize,
     pub prompt: String,
@@ -52,6 +56,7 @@ pub struct NewWindowCommand {
 pub enum WindowCommand {
     Println(PrintCommand),
     Print(PrintCommand),
+    PrintChat(PrintChatCommand),
     Read(ReadCommand),
     New(NewWindowCommand),
     Init(),

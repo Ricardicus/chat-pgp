@@ -230,20 +230,24 @@ async fn cb_chat(public_key: String, message: String) {
 }
 
 async fn cb_chat_input(
-    _pub_key_fingerprint: String,
+    pub_key: String,
     session_id: String,
     topic_out: String,
+    input: String,
 ) -> Option<(String, String)> {
-    let prompt = ">> ".to_string();
-    let mut input = read_chat_message(1).await;
-    if input.is_err() {
-        return None;
+    let pub_key_decoded = match base64::decode(pub_key) {
+        Err(_) => {
+            return None;
+        }
+        Ok(pub_key) => pub_key,
+    };
+    match PGPEnCryptOwned::new_from_vec(&pub_key_decoded) {
+        Ok(pub_encro) => {
+            let fingerprint = pub_encro.get_public_key_fingerprint();
+        }
+        _ => {}
     }
-    let input = input.unwrap();
-    if input.is_none() {
-        return None;
-    }
-    let input = input.unwrap();
+
     let topic = Topic::Internal.as_str();
     let mut msg = SessionMessage::new_internal(
         session_id.to_string(),
@@ -706,8 +710,8 @@ async fn main() {
     let callback_init_declined = move |arg1: String, arg2: String| {
         Box::pin(cb_init_declined(arg1, arg2)) as Pin<Box<dyn Future<Output = ()> + Send>>
     };
-    let callback_chat_input = move |arg1: String, arg2: String, arg3: String| {
-        Box::pin(cb_chat_input(arg1, arg2, arg3))
+    let callback_chat_input = move |arg1: String, arg2: String, arg3: String, arg4: String| {
+        Box::pin(cb_chat_input(arg1, arg2, arg3, arg4))
             as Pin<Box<dyn Future<Output = Option<(String, String)>> + Send>>
     };
     let callback_terminate =
