@@ -10,22 +10,22 @@ use session::protocol::*;
 use session::Session;
 use std::fs;
 use std::future::Future;
-use std::io;
+
 use std::pin::Pin;
 use std::process::exit;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex, OnceCell};
 use tokio::time::{timeout, Duration};
 
+use crate::session::middleware::ZenohHandler;
 use zenoh::prelude::r#async::*;
 use zenoh::Config;
 
 mod util;
+use util::get_current_datetime;
 
 mod pgp;
-use pgp::pgp::{
-    generate_new_key, get_public_key_as_base64, read_from_gpg, read_from_vec, test_sign_verify,
-};
+use pgp::pgp::{generate_new_key, read_from_gpg, read_from_vec};
 
 extern crate sequoia_openpgp as openpgp;
 use openpgp::cert::prelude::*;
@@ -35,11 +35,9 @@ use ncurses::*;
 
 mod terminal;
 use terminal::{
-    format_chat_msg, format_chat_msg_fmt, NewWindowCommand, PrintChatCommand, PrintCommand,
-    ReadCommand, WindowCommand, WindowManager, WindowPipe,
+    format_chat_msg, format_chat_msg_fmt, short_fingerprint, PrintChatCommand, PrintCommand,
+    WindowCommand, WindowManager, WindowPipe, ChatClosedCommand
 };
-
-use session::middleware::{ZMQHandler, ZenohHandler};
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -75,6 +73,13 @@ async fn println_message(window: usize, message: String) {
         .send(WindowCommand::Println(PrintCommand { window, message }))
         .await;
 }
+async fn println_chat_closed_message(message: String) {
+    PIPE.get()
+        .unwrap()
+        .send(WindowCommand::ChatClosed(ChatClosedCommand { message }))
+        .await;
+}
+
 async fn println_chat_message(chatid: String, message: String) {
     PIPE.get()
         .unwrap()
@@ -161,7 +166,7 @@ impl InputCommand {
     }
 
     async fn print_help() {
-        let mut help_text = String::new();
+        let _help_text = String::new();
         println_message_str(1, "Available commands:").await;
         println_message_str(1, "!list").await;
         println_message_str(1, "- List and enumerate all discovered peers.").await;
@@ -252,6 +257,32 @@ async fn cb_chat_input(
     return Some((topic.to_string(), msg.serialize().unwrap()));
 }
 
+async fn cb_closed(public_key: String, _session_id: String) {
+    let pub_key_decoded = base64::decode(public_key);
+    if pub_key_decoded.is_err() {
+        return;
+    }
+    let pub_key_decoded = pub_key_decoded.unwrap();
+
+    match PGPEnCryptOwned::new_from_vec(&pub_key_decoded) {
+        Ok(pub_encro) => {
+            let userid = pub_encro.get_userid();
+            let fingerprint = pub_encro.get_public_key_fingerprint();
+            let fingerprint_short = short_fingerprint(&fingerprint);
+            let date_and_time = get_current_datetime();
+
+            println_chat_closed_message(
+                format!(
+                    "[{} - ** {} ({}) has terminated the chat session **]",
+                    date_and_time, userid, fingerprint_short
+                ),
+            )
+            .await;
+        }
+        _ => {}
+    }
+}
+
 async fn cb_discovered(public_key: String) -> bool {
     let pub_key_decoded = match base64::decode(public_key) {
         Err(_) => {
@@ -260,7 +291,7 @@ async fn cb_discovered(public_key: String) -> bool {
         Ok(pub_key) => pub_key,
     };
     match PGPEnCryptOwned::new_from_vec(&pub_key_decoded) {
-        Ok(pub_encro) => true,
+        Ok(_pub_encro) => true,
         _ => false,
     }
 }
@@ -269,7 +300,7 @@ async fn cb_terminate() {
     println_message(1, format!("-- Terminating session ...")).await;
 }
 
-async fn cb_init_declined(public_key: String, message: String) {
+async fn cb_init_declined(public_key: String, _message: String) {
     let pub_key_decoded = match base64::decode(public_key) {
         Err(_) => {
             return;
@@ -313,7 +344,7 @@ async fn cb_init_await(public_key: String) {
     }
 }
 
-async fn cb_init_accepted(public_key: String) {
+async fn cb_init_accepted(_public_key: String) {
     println_message(
         1,
         format!("-- Peer accepted the connection. You can now chat!"),
@@ -329,7 +360,7 @@ async fn cb_init_incoming(public_key: String) -> bool {
         Ok(pub_key) => pub_key,
     };
     match PGPEnCryptOwned::new_from_vec(&pub_key_decoded) {
-        Ok(pub_encro) => true,
+        Ok(_pub_encro) => true,
         _ => {
             let _ = &format!("-- Chat was not initiailized");
             false
@@ -550,11 +581,11 @@ async fn launch_terminal_program(
                                         ),
                                     )
                                     .await;
-                                    let session_id = match session
+                                    let _session_id = match session
                                         .initialize_session_zenoh(peer.clone())
                                         .await
                                     {
-                                        Ok(ok) => {}
+                                        Ok(_ok) => {}
                                         Err(not_ok) => {
                                             terminate(session_tx.clone()).await;
                                             println!("{}", not_ok);
@@ -730,6 +761,9 @@ async fn main() {
     let callback_init_declined = move |arg1: String, arg2: String| {
         Box::pin(cb_init_declined(arg1, arg2)) as Pin<Box<dyn Future<Output = ()> + Send>>
     };
+    let callback_session_close = move |arg1: String, arg2: String| {
+        Box::pin(cb_closed(arg1, arg2)) as Pin<Box<dyn Future<Output = ()> + Send>>
+    };
     let callback_chat_input = move |arg1: String, arg2: String, arg3: String, arg4: String| {
         Box::pin(cb_chat_input(arg1, arg2, arg3, arg4))
             as Pin<Box<dyn Future<Output = Option<(String, String)>> + Send>>
@@ -761,6 +795,9 @@ async fn main() {
         .await;
     session
         .register_callback_terminate(Box::new(callback_terminate))
+        .await;
+    session
+        .register_callback_session_close(Box::new(callback_session_close))
         .await;
 
     // First task to initialize the global value

@@ -70,23 +70,6 @@ pub mod pgp {
         }
     }
 
-    pub fn test_sign_verify(cert: &openpgp::Cert) -> bool {
-        let mut v = Vec::new();
-        let text = "hello".to_string();
-        let passphrase = "1234512345".to_string();
-
-        sign(&mut v, &text, cert, &passphrase);
-
-        //let val = v;// base64::encode(v);
-
-        //let val = val; //base64::decode(val).unwrap();
-        let val = v;
-        match verify(&val, &text, &cert) {
-            Ok(_) => true,
-            Err(_) => false,
-        }
-    }
-
     pub fn sign(
         sink: &mut (dyn Write + Send + Sync),
         plaintext: &str,
@@ -95,7 +78,7 @@ pub mod pgp {
     ) -> openpgp::Result<()> {
         let p = &P::new();
         // Get the keypair to do the signing from the Cert.
-        let key = tsk.primary_key().key().clone().parts_into_secret()?;
+        let _key = tsk.primary_key().key().clone().parts_into_secret()?;
         let mut keypair = None;
         if passphrase.len() == 0 {
             keypair = Some(
@@ -152,7 +135,7 @@ pub mod pgp {
         let mut message = LiteralWriter::new(message).build()?;
 
         // Sign the data.
-        message.write_all(plaintext.clone().as_bytes())?;
+        message.write_all(plaintext.as_bytes())?;
 
         // Finalize the OpenPGP message to make sure that all data is
         // written.

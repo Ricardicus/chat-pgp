@@ -1,9 +1,8 @@
 use ncurses::*;
 use std::collections::HashMap;
-use std::marker::PhantomData;
 
 use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex, Notify, OnceCell, Semaphore};
+use tokio::sync::{mpsc, Mutex, OnceCell, Semaphore};
 use tokio::time::{timeout, Duration};
 
 use crate::session::crypto::{Cryptical, CrypticalID};
@@ -36,6 +35,10 @@ pub struct PrintCommand {
     pub message: String,
 }
 #[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ChatClosedCommand {
+    pub message: String,
+}
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct PrintChatCommand {
     pub chatid: String,
     pub message: String,
@@ -62,6 +65,7 @@ pub enum WindowCommand {
     PrintChat(PrintChatCommand),
     Read(ReadCommand),
     New(NewWindowCommand),
+    ChatClosed(ChatClosedCommand),
     Init(),
     Shutdown(),
 }
@@ -203,6 +207,11 @@ impl App {
             should_run: self.should_run.clone(),
             tx: self.tx.clone(),
         }
+    }
+
+    async fn clear_chat(&mut self) {
+        let mut state = self.state.lock().await;
+        state.chat_messages.clear();
     }
 
     async fn move_cursor_left(&mut self, len: usize) {
@@ -371,6 +380,10 @@ impl App {
                             }
                             WindowCommand::Println(cmd) => {
                                 app.write_new_message(cmd.message).await;
+                            }
+                            WindowCommand::ChatClosed(cmd) => {
+                                app.write_new_message(cmd.message).await;
+                                app.clear_chat().await;
                             }
                             WindowCommand::PrintChat(cmd) => {
                                 app.write_chat_new_message(cmd.chatid, cmd.message).await;
@@ -648,7 +661,7 @@ async fn send_app_state(state: AppState) {
     let _ = STATE.get().unwrap().send(state).await;
 }
 
-fn short_fingerprint(fingerprint: &str) -> String {
+pub fn short_fingerprint(fingerprint: &str) -> String {
     if fingerprint.len() > 8 {
         let first_four = &fingerprint[0..4];
         let last_four = &fingerprint[fingerprint.len() - 4..];

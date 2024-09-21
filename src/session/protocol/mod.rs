@@ -6,6 +6,8 @@ pub enum Topic {
     Message,
     Errors,
     Internal,
+    Close,
+    Heartbeat,
 }
 
 impl Topic {
@@ -17,7 +19,13 @@ impl Topic {
             Topic::Message => "session/message",
             Topic::Errors => "errors",
             Topic::Internal => "internal",
+            Topic::Close => "session/close",
+            Topic::Heartbeat => "session/heartbeat",
         }
+    }
+
+    pub fn to_string(&self) -> String {
+        self.as_str().to_string()
     }
     pub fn as_reply(&self) -> String {
         let mut s = self.as_str().to_string();
@@ -39,6 +47,24 @@ impl Topic {
         t.push_str("/");
         t.push_str(fingerprint);
         t.push_str("/out");
+        t
+    }
+    pub fn close_topic(fingerprint: &str) -> String {
+        let mut t = Topic::Close.as_str().to_string();
+        t.push_str("/");
+        t.push_str(fingerprint);
+        t
+    }
+    pub fn init_topic(fingerprint: &str) -> String {
+        let mut t = Topic::Initialize.as_str().to_string();
+        t.push_str("/");
+        t.push_str(fingerprint);
+        t
+    }
+    pub fn heartbeat_topic(fingerprint: &str) -> String {
+        let mut t = Topic::Heartbeat.as_str().to_string();
+        t.push_str("/");
+        t.push_str(fingerprint);
         t
     }
 }

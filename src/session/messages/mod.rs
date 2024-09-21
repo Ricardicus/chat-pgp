@@ -35,7 +35,9 @@ pub struct KeyPassMsg {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct CloseMsg {
-    pub data: String,
+    pub session_id: String,
+    pub pub_key: String,
+    pub signature: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -47,6 +49,9 @@ pub struct ChatMsg {
 pub struct CloseOkMsg {
     pub data: String,
 }
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct HeartbeatMsg {}
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct PingMsg {}
@@ -112,6 +117,7 @@ pub enum MessageData {
     Discovery(DiscoveryMsg),
     DiscoveryReply(DiscoveryReplyMsg),
     Internal(InternalMsg),
+    Heartbeat(HeartbeatMsg),
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -246,10 +252,21 @@ impl SessionMessage {
         }
     }
 
-    pub fn new_close(data: String) -> Self {
+    pub fn new_close(session_id: String, pub_key: String, signature: String) -> Self {
         SessionMessage {
-            message: MessageData::Close(CloseMsg { data: data }),
-            session_id: "".to_string(),
+            message: MessageData::Close(CloseMsg {
+                session_id: session_id.clone(),
+                pub_key,
+                signature,
+            }),
+            session_id: session_id.clone(),
+        }
+    }
+
+    pub fn new_heartbeat(session_id: String) -> Self {
+        SessionMessage {
+            message: MessageData::Heartbeat(HeartbeatMsg {}),
+            session_id: session_id.clone(),
         }
     }
 
@@ -287,7 +304,7 @@ impl SessionMessage {
         match &self.message {
             MessageData::Init(msg) => msg.pub_key.clone(),
             MessageData::InitOk(msg) => msg.sym_key_encrypted.clone(),
-            MessageData::Close(msg) => msg.data.clone(),
+            MessageData::Close(msg) => msg.session_id.clone(),
             MessageData::Chat(msg) => msg.message.clone(),
             MessageData::Encrypted(msg) => msg.data.clone(),
             _ => return "TODO".to_string(),
