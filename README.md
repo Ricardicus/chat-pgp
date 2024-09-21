@@ -75,8 +75,9 @@ Want to add:
 
 The platform now only works strictly online, with both peers connected at the same time.
 
+## Contribute
+
 Please feel free to test and come with feedback. This project is in its early stage
 and I would appreciate contributions if you agree with this vision.
 
-No messages are stored at the moment, it requires both peers 
 
