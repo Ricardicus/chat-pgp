@@ -60,10 +60,11 @@ This is a work in progress. So far I have this:
 - PGP assymetrical encryption using pre-existing pgp-keys (you can create them with gpg)
 - Communcations based on Zenoh
 - Encrypted one-to-one online chat in terminal (ncurses) interface.
+- Terminal interface based on ratatui
 
 Will work on this:
 
-- Better terminal interface (ncurses) in the near term
+- Better terminal interface in the near term
 - Web front end (on localhost) in the long term
 - Apply local gpg keychain as policy for session key verification
 - PGP session key signed by main key instead of using the main key for each session establishment
