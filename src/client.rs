@@ -35,8 +35,8 @@ use ncurses::*;
 
 mod terminal;
 use terminal::{
-    format_chat_msg, format_chat_msg_fmt, short_fingerprint, PrintChatCommand, PrintCommand,
-    WindowCommand, WindowManager, WindowPipe, ChatClosedCommand
+    format_chat_msg, format_chat_msg_fmt, short_fingerprint, ChatClosedCommand, PrintChatCommand,
+    PrintCommand, WindowCommand, WindowManager, WindowPipe,
 };
 
 #[derive(Parser)]
@@ -271,12 +271,10 @@ async fn cb_closed(public_key: String, _session_id: String) {
             let fingerprint_short = short_fingerprint(&fingerprint);
             let date_and_time = get_current_datetime();
 
-            println_chat_closed_message(
-                format!(
-                    "[{} - ** {} ({}) has terminated the chat session **]",
-                    date_and_time, userid, fingerprint_short
-                ),
-            )
+            println_chat_closed_message(format!(
+                "[{} - {} ({}) has terminated the chat session]",
+                date_and_time, userid, fingerprint_short
+            ))
             .await;
         }
         _ => {}
@@ -296,9 +294,7 @@ async fn cb_discovered(public_key: String) -> bool {
     }
 }
 
-async fn cb_terminate() {
-    println_message(1, format!("-- Terminating session ...")).await;
-}
+async fn cb_terminate() {}
 
 async fn cb_init_declined(public_key: String, _message: String) {
     let pub_key_decoded = match base64::decode(public_key) {
@@ -500,7 +496,18 @@ async fn launch_terminal_program(
                 let input = input.unwrap();
                 if input.is_none() {
                     // terminate
-                    terminate(session.get_tx().await).await;
+                    //
+                    let topic = Topic::Internal.as_str();
+                    let msg = SessionMessage::new_internal(
+                        "internal".to_owned(),
+                        "terminate".to_owned(),
+                        topic.to_string(),
+                    );
+
+                    let _ = session_tx
+                        .send((topic.to_string(), msg.serialize().unwrap()))
+                        .await;
+
                     keep_running = false;
                     continue;
                 }

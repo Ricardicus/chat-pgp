@@ -79,7 +79,7 @@ where
     pub tx: mpsc::Sender<(String, String)>,
     pub tx_chat: mpsc::Sender<(String, String)>,
     pub rx_chat: Arc<Mutex<mpsc::Receiver<(String, String)>>>,
-    pub rx: mpsc::Receiver<(String, String)>,
+    pub rx: Arc<Mutex<mpsc::Receiver<(String, String)>>>,
     pub callbacks_chat: Arc<
         Mutex<
             Vec<
@@ -154,7 +154,7 @@ where
 
 impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
     pub fn new(host_encro: PGPEnDeCrypt, middleware_config: String) -> Self {
-        let (tx, rx) = mpsc::channel(100);
+        let (tx, mut rx) = mpsc::channel(100);
         let (tx_chat, rx_chat) = mpsc::channel(100);
         Session {
             sessions: Arc::new(Mutex::new(HashMap::new())),
@@ -166,7 +166,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
             tx: tx.clone(),
             tx_chat: tx_chat.clone(),
             rx_chat: Arc::new(Mutex::new(rx_chat)),
-            rx,
+            rx: Arc::new(Mutex::new(rx)),
 
             callbacks_chat: Arc::new(Mutex::new(Vec::new())),
             callbacks_discovered: Arc::new(Mutex::new(Vec::new())),
@@ -186,7 +186,6 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
     }
 
     pub fn clone(&self) -> Self {
-        let (tx, rx) = mpsc::channel(100);
         Self {
             sessions: Arc::clone(&self.sessions),
             discovered: Arc::clone(&self.discovered),
@@ -194,9 +193,9 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
             requests_outgoing_initialization: Arc::clone(&self.requests_outgoing_initialization),
 
             host_encro: Arc::clone(&self.host_encro),
-            tx,
+            tx: self.tx.clone(),
             tx_chat: self.tx_chat.clone(),
-            rx,
+            rx: self.rx.clone(),
             rx_chat: self.rx_chat.clone(),
             callbacks_chat: Arc::clone(&self.callbacks_chat),
             callbacks_discovered: Arc::clone(&self.callbacks_discovered),
@@ -880,7 +879,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
         let keep_running = self.running.clone();
         while *keep_running.lock().await {
             let timeout_duration = Duration::from_secs(5);
-            let received = match timeout(timeout_duration, self.rx.recv()).await {
+            let received = match timeout(timeout_duration, self.rx.lock().await.recv()).await {
                 Ok(Some(received)) => Some(received),
                 Ok(None) => None,
                 Err(_) => {
@@ -899,6 +898,16 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
             let _msg = match Message::deserialize(&received.1) {
                 Ok(msg) => {
                     let session_id = msg.session_id.clone();
+                    if topic == "internal" {
+                        match msg.message {
+                            Internal(ref msg) => {
+                                if msg.message == "terminate" {
+                                    self.close_sessions(responder.clone()).await;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
                     match self.handle_message(msg, &topic).await {
                         Ok(Some(res)) => {
                             // Do something
