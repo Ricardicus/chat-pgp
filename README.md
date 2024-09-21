@@ -17,7 +17,7 @@ The communication protocol is built on [Zenoh](https://github.com/eclipse-zenoh/
 Zenoh is an extremely flexible middleware that does not force a network topology onto
 the project. By providing a configuration file to zenoh, one can configure the entire network oneself; 
 so that one does not have to rely on routers and peers someone else setup for
-this project. There is support for TLS (one- and two-way) authentication in zenoh. The default behaviour is desrocbed in the file zenoh/config.json5 . 
+this project. There is support for TLS (one- and two-way) authentication in zenoh. The default behaviour is described in the file [zenoh/config.json5](https://github.com/Ricardicus/chat-pgp/blob/master/zenoh/config.json5). 
 
 By default, I have set up a router running on a Digital Ocean Droplet, in a server they claim to be running in Amsterdam.
 Starting a zenoh router is very simple. I just launch the zenoh daemon, zenohd.
