@@ -1,7 +1,6 @@
 #![allow(dead_code)]
 mod session;
 
-use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use session::crypto::{
     ChaCha20Poly1305EnDeCrypt, Cryptical, CrypticalID, PGPEnCryptOwned, PGPEnDeCrypt,
@@ -15,8 +14,12 @@ use std::future::Future;
 use std::pin::Pin;
 use std::process::exit;
 use std::sync::Arc;
-use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex, OnceCell};
+use tokio::time::{timeout, Duration};
+
+use crate::session::middleware::ZenohHandler;
+use zenoh::prelude::r#async::*;
+use zenoh::Config;
 
 mod util;
 use util::get_current_datetime;
@@ -32,10 +35,9 @@ use ncurses::*;
 
 mod terminal;
 use terminal::{
-    NewWindowCommand, PrintCommand, WindowCommand, WindowManager, WindowPipe,
+    format_chat_msg, format_chat_msg_fmt, short_fingerprint, ChatClosedCommand, PrintChatCommand,
+    PrintCommand, WindowCommand, WindowManager, WindowPipe,
 };
-
-
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -63,38 +65,35 @@ struct Cli {
 }
 
 // Create a global instance of WindowManager
-static mut PIPE_WIN0: Lazy<WindowPipe> = Lazy::new(|| WindowPipe::new());
-static mut PIPE_WIN1: Lazy<WindowPipe> = Lazy::new(|| WindowPipe::new());
+static PIPE: OnceCell<WindowPipe<WindowCommand>> = OnceCell::const_new();
 
 async fn println_message(window: usize, message: String) {
-    if window == 0 {
-        unsafe {
-            PIPE_WIN0
-                .send(WindowCommand::Println(PrintCommand { window, message }))
-                .await;
-        }
-    } else {
-        unsafe {
-            PIPE_WIN1
-                .send(WindowCommand::Println(PrintCommand { window, message }))
-                .await;
-        }
-    }
+    PIPE.get()
+        .unwrap()
+        .send(WindowCommand::Println(PrintCommand { window, message }))
+        .await;
+}
+async fn println_chat_closed_message(message: String) {
+    PIPE.get()
+        .unwrap()
+        .send(WindowCommand::ChatClosed(ChatClosedCommand { message }))
+        .await;
+}
+
+async fn println_chat_message(chatid: String, message: String) {
+    PIPE.get()
+        .unwrap()
+        .send(WindowCommand::PrintChat(PrintChatCommand {
+            chatid,
+            message,
+        }))
+        .await;
 }
 async fn print_message(window: usize, message: String) {
-    if window == 0 {
-        unsafe {
-            PIPE_WIN0
-                .send(WindowCommand::Print(PrintCommand { window, message }))
-                .await;
-        }
-    } else {
-        unsafe {
-            PIPE_WIN1
-                .send(WindowCommand::Print(PrintCommand { window, message }))
-                .await;
-        }
-    }
+    PIPE.get()
+        .unwrap()
+        .send(WindowCommand::Print(PrintCommand { window, message }))
+        .await;
 }
 async fn read_message(
     window: usize,
@@ -102,44 +101,12 @@ async fn read_message(
     upper_prompt: &str,
     timeout: i32,
 ) -> Result<String, ()> {
-    let mut input = Err(());
-    if window == 0 {
-        unsafe {
-            input = PIPE_WIN0
-                .get_input(window, prompt, upper_prompt, timeout)
-                .await;
-        }
-    } else {
-        unsafe {
-            input = PIPE_WIN1
-                .get_input(window, prompt, upper_prompt, timeout)
-                .await;
-        }
-    }
-    input
+    Ok("".to_string())
 }
-async fn read_chat_message(window: usize) -> Result<Option<String>, ()> {
-    let mut input = Err(());
-    if window == 0 {
-        unsafe {
-            input = PIPE_WIN0.get_chat_input().await;
-        }
-    } else {
-        unsafe {
-            input = PIPE_WIN1.get_chat_input().await;
-        }
-    }
-    input
-}
+
 async fn send_chat_message(window: usize, message: Option<String>) {
-    if window == 0 {
-        unsafe {
-            PIPE_WIN0.tx_chat_input(message).await;
-        }
-    } else {
-        unsafe {
-            PIPE_WIN1.tx_chat_input(message).await;
-        }
+    unsafe {
+        //PIPE.get().unwrap().tx_chat_input(message).await;
     }
 }
 
@@ -215,28 +182,23 @@ impl InputCommand {
     fn get_small_help() -> String {
         "Type !exit to exit and !help for more commands.".to_string()
     }
-    async fn read_yes_or_no(window: usize, prompt: &str) -> Result<bool, ()> {
-        let input = read_message(window, prompt, "", 60).await;
-        match input {
-            Ok(input) => {
+    async fn read_yes_or_no(
+        window: usize,
+        prompt: &str,
+        rx: &mut mpsc::Receiver<Option<String>>,
+    ) -> Result<bool, ()> {
+        println_message_str(1, prompt).await;
+        let input = rx.recv().await;
+        if input.is_some() {
+            let input = input.unwrap();
+            if input.is_some() {
+                let input = input.unwrap();
                 if input.to_lowercase().starts_with('y') {
-                    Ok(true)
-                } else {
-                    Ok(false)
+                    return Ok(true);
                 }
             }
-            Err(_) => Err(()),
         }
-    }
-}
-
-fn short_fingerprint(fingerprint: &str) -> String {
-    if fingerprint.len() > 8 {
-        let first_four = &fingerprint[0..4];
-        let last_four = &fingerprint[fingerprint.len() - 4..];
-        format!("{}...{}", first_four, last_four)
-    } else {
-        fingerprint.to_string()
+        Ok(true)
     }
 }
 
@@ -249,38 +211,32 @@ async fn cb_chat(public_key: String, message: String) {
     };
     match PGPEnCryptOwned::new_from_vec(&pub_key_decoded) {
         Ok(pub_encro) => {
-            let date_time = get_current_datetime();
-            println_message(
-                0,
-                format!(
-                    "{} - {} ({}): {}",
-                    date_time,
-                    pub_encro.get_userid(),
-                    short_fingerprint(&pub_encro.get_public_key_fingerprint()),
-                    message
-                ),
-            )
-            .await;
+            let (chat_id, chat_view) = format_chat_msg(&message, &pub_encro);
+            println_chat_message(chat_id, chat_view).await;
         }
         _ => {}
     }
 }
 
 async fn cb_chat_input(
-    _pub_key_fingerprint: String,
+    pub_key: String,
     session_id: String,
     topic_out: String,
+    input: String,
 ) -> Option<(String, String)> {
-    let _prompt = ">> ".to_string();
-    let input = read_chat_message(1).await;
-    if input.is_err() {
-        return None;
+    let pub_key_decoded = match base64::decode(pub_key) {
+        Err(_) => {
+            return None;
+        }
+        Ok(pub_key) => pub_key,
+    };
+    match PGPEnCryptOwned::new_from_vec(&pub_key_decoded) {
+        Ok(pub_encro) => {
+            let fingerprint = pub_encro.get_public_key_fingerprint();
+        }
+        _ => {}
     }
-    let input = input.unwrap();
-    if input.is_none() {
-        return None;
-    }
-    let input = input.unwrap();
+
     let topic = Topic::Internal.as_str();
     let mut msg = SessionMessage::new_internal(
         session_id.to_string(),
@@ -315,13 +271,10 @@ async fn cb_closed(public_key: String, _session_id: String) {
             let fingerprint_short = short_fingerprint(&fingerprint);
             let date_and_time = get_current_datetime();
 
-            println_message(
-                0,
-                format!(
-                    "[{} - ** {} ({}) has terminated the chat session **]",
-                    date_and_time, userid, fingerprint_short
-                ),
-            )
+            println_chat_closed_message(format!(
+                "[{} - {} ({}) has terminated the chat session]",
+                date_and_time, userid, fingerprint_short
+            ))
             .await;
         }
         _ => {}
@@ -341,9 +294,7 @@ async fn cb_discovered(public_key: String) -> bool {
     }
 }
 
-async fn cb_terminate() {
-    println_message(1, format!("-- Terminating session ...")).await;
-}
+async fn cb_terminate() {}
 
 async fn cb_init_declined(public_key: String, _message: String) {
     let pub_key_decoded = match base64::decode(public_key) {
@@ -414,13 +365,9 @@ async fn cb_init_incoming(public_key: String) -> bool {
 }
 
 async fn terminate(session_tx: mpsc::Sender<(String, String)>) {
-    let pipe0;
+    let pipe;
     unsafe {
-        pipe0 = PIPE_WIN0.clone();
-    }
-    let pipe1;
-    unsafe {
-        pipe1 = PIPE_WIN1.clone();
+        pipe = PIPE.get().unwrap().clone();
     }
     let topic = Topic::Internal.as_str();
     let msg = SessionMessage::new_internal(
@@ -428,8 +375,7 @@ async fn terminate(session_tx: mpsc::Sender<(String, String)>) {
         "terminate".to_owned(),
         topic.to_string(),
     );
-    pipe0.send(WindowCommand::Shutdown()).await;
-    pipe1.send(WindowCommand::Shutdown()).await;
+    pipe.send(WindowCommand::Shutdown()).await;
     send_chat_message(1, None).await;
 
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -443,6 +389,42 @@ async fn terminal_program(
     cert: Arc<Cert>,
     mut session: Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt>,
 ) {
+}
+
+async fn launch_terminal_program(
+    cert: Arc<Cert>,
+    session_tx: mpsc::Sender<(String, String)>,
+    mut session: Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt>,
+) {
+    let pipe;
+    unsafe {
+        pipe = PIPE.get().unwrap().clone();
+    }
+    let (tx, mut rx) = mpsc::channel::<Option<String>>(100);
+    // Setup window manager serving
+    tokio::spawn(async move {
+        let mut window_manager = WindowManager::new();
+
+        let pipe_clone = pipe.clone();
+        window_manager.serve(pipe_clone, tx).await;
+    });
+    let pipe;
+    unsafe {
+        pipe = PIPE.get().unwrap().clone();
+    }
+    // Initialize
+    pipe.send(WindowCommand::Init()).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let zc = session.middleware_config.clone();
+    let zenoh_config = Config::from_file(zc).unwrap();
+    let zenoh_session = Arc::new(Mutex::new(zenoh::open(zenoh_config).res().await.unwrap()));
+    let zenoh_handler = ZenohHandler::new(zenoh_session);
+
+    let pgp_handler = PGPEnDeCrypt::new_no_certpass(cert.clone());
+
+    // Launch window manager program
+    tokio::time::sleep(Duration::from_millis(400)).await;
     let mut userid = String::new();
     for uid in cert.userids() {
         userid.push_str(&uid.userid().to_string());
@@ -480,7 +462,7 @@ async fn terminal_program(
                         .await;
                         println_message_str(1, "-- Do you want to chat with this peer? [y/n]")
                             .await;
-                        let r = InputCommand::read_yes_or_no(1, ">> ").await;
+                        let r = InputCommand::read_yes_or_no(1, ">> ", &mut rx).await;
                         if r.is_ok() && r.unwrap() {
                             let _ = session.accept_pending_request(&session_id).await;
                             println_message_str(1, "-- Accepted this chat request.").await;
@@ -504,14 +486,35 @@ async fn terminal_program(
                 }
             }
         } else {
-            let input;
-            if print_prompt {
-                input = read_message(1, ">> ", &upper_prompt, 1).await;
-            } else {
-                input = read_message(1, "", &upper_prompt, 1).await;
+            let timeout_duration = Duration::from_secs(1);
+            let input = timeout(timeout_duration, rx.recv()).await;
+            if input.is_err() {
+                continue;
             }
-            if input.is_ok() {
+            let input = input.unwrap();
+            if input.is_some() {
                 let input = input.unwrap();
+                if input.is_none() {
+                    // terminate
+                    //
+                    let topic = Topic::Internal.as_str();
+                    let msg = SessionMessage::new_internal(
+                        "internal".to_owned(),
+                        "terminate".to_owned(),
+                        topic.to_string(),
+                    );
+
+                    let _ = session_tx
+                        .send((topic.to_string(), msg.serialize().unwrap()))
+                        .await;
+
+                    keep_running = false;
+                    continue;
+                }
+                let input = input.unwrap();
+                let mut s = ">> ".to_string();
+                s.push_str(&input);
+                println_message(1, s).await;
                 if input.len() > 0 {
                     print_prompt = true;
                 } else {
@@ -530,6 +533,7 @@ async fn terminal_program(
                             )
                             .await;
                         } else {
+                            println_message_str(1, "Peers detected:").await;
                             for peer in discovered {
                                 let peer_decoded = base64::decode(&peer).unwrap();
                                 let peer_cert = read_from_vec(&peer_decoded).unwrap();
@@ -571,7 +575,7 @@ async fn terminal_program(
                                 ),
                             )
                             .await;
-                            let response = InputCommand::read_yes_or_no(1, ">> ").await;
+                            let response = InputCommand::read_yes_or_no(1, ">> ", &mut rx).await;
                             if response.is_err() {
                             } else {
                                 let go_further = response.unwrap();
@@ -620,7 +624,43 @@ async fn terminal_program(
                     None => {
                         // Send this input to listeners
                         if input.len() > 0 && session.get_number_of_sessions().await > 0 {
-                            send_chat_message(1, Some(input)).await;
+                            // FOR NOW: Only one session to send at a time...
+                            let id = session.get_session_ids().await[0].clone();
+                            let other_pub_key = session.get_pub_key_from_session_id(&id).await;
+                            if other_pub_key.is_ok() {
+                                let other_pub_key = other_pub_key.unwrap();
+                                let pub_key_decoded = match base64::decode(other_pub_key) {
+                                    Err(_) => Err(()),
+                                    Ok(pub_key) => Ok(pub_key),
+                                };
+                                if pub_key_decoded.is_ok() {
+                                    let pub_key_decoded = pub_key_decoded.unwrap();
+                                    match PGPEnCryptOwned::new_from_vec(&pub_key_decoded) {
+                                        Ok(pub_encro) => {
+                                            let fingerprint =
+                                                pub_encro.get_public_key_fingerprint();
+                                            let topic_out = Topic::messaging_topic_in(&fingerprint);
+                                            let msg = SessionMessage::new_chat(input.clone());
+                                            let _ = session
+                                                .session_send_msg(
+                                                    &id,
+                                                    msg,
+                                                    &topic_out,
+                                                    &zenoh_handler,
+                                                )
+                                                .await;
+                                            let fingerprint = session.get_fingerprint().await;
+                                            let userid = session.get_userid().await;
+
+                                            let (chat_id, chat_view) =
+                                                format_chat_msg_fmt(&input, &userid, &fingerprint);
+
+                                            println_chat_message(chat_id, chat_view).await;
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -631,83 +671,9 @@ async fn terminal_program(
     }
 }
 
-async fn launch_terminal_program(
-    cert: Arc<Cert>,
-    session_tx: mpsc::Sender<(String, String)>,
-    session: Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt>,
-) {
-    let pipe0;
-    unsafe {
-        pipe0 = PIPE_WIN0.clone();
-    }
-    let pipe1;
-    unsafe {
-        pipe1 = PIPE_WIN1.clone();
-    }
-    // Setup window manager serving
-    tokio::spawn(async move {
-        let mut window_manager = WindowManager::new();
-
-        let pipe_clone = pipe0.clone();
-        window_manager.serve(pipe_clone).await;
-    });
-    tokio::spawn(async move {
-        let mut window_manager = WindowManager::new();
-
-        let pipe_clone = pipe1.clone();
-        window_manager.serve(pipe_clone).await;
-    });
-    let pipe0;
-    unsafe {
-        pipe0 = PIPE_WIN0.clone();
-    }
-    let pipe1;
-    unsafe {
-        pipe1 = PIPE_WIN1.clone();
-    }
-
-    // Initialize
-    pipe0.send(WindowCommand::Init()).await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    let pgp_handler = PGPEnDeCrypt::new_no_certpass(cert.clone());
-    let _pub_key_fingerprint = pgp_handler.get_public_key_fingerprint();
-    let _pub_key_userid = pgp_handler.get_userid();
-    let _pub_key_full = pgp_handler.get_public_key_as_base64();
-
-    let (max_y, max_x) = WindowManager::get_max_yx();
-    let num_windows = 2;
-    let win_height = max_y / num_windows as i32;
-    let win_width = max_x;
-
-    // Create the windows
-    for i in 0..num_windows {
-        let start_y = i * win_height;
-        let window_cmd = NewWindowCommand {
-            win_number: i as usize,
-            start_y,
-            win_height,
-            win_width,
-        };
-        if i == 0 {
-            pipe0.send(WindowCommand::New(window_cmd)).await;
-        } else {
-            pipe1.send(WindowCommand::New(window_cmd)).await;
-        }
-    }
-
-    tokio::time::sleep(Duration::from_millis(600)).await;
-
-    let pipe0;
-    unsafe {
-        pipe0 = PIPE_WIN0.clone();
-    }
-    // Launch window manager program
-    tokio::spawn(async move {
-        // Wait for the window manager loops to be set up
-        tokio::time::sleep(Duration::from_millis(400)).await;
-        terminal_program(session_tx, cert, session).await;
-    });
+async fn initialize_global_value() {
+    // Directly initialize the GLOBAL_VALUE using `init`
+    PIPE.set(WindowPipe::new());
 }
 
 #[tokio::main]
@@ -805,8 +771,8 @@ async fn main() {
     let callback_session_close = move |arg1: String, arg2: String| {
         Box::pin(cb_closed(arg1, arg2)) as Pin<Box<dyn Future<Output = ()> + Send>>
     };
-    let callback_chat_input = move |arg1: String, arg2: String, arg3: String| {
-        Box::pin(cb_chat_input(arg1, arg2, arg3))
+    let callback_chat_input = move |arg1: String, arg2: String, arg3: String, arg4: String| {
+        Box::pin(cb_chat_input(arg1, arg2, arg3, arg4))
             as Pin<Box<dyn Future<Output = Option<(String, String)>> + Send>>
     };
     let callback_terminate =
@@ -841,6 +807,14 @@ async fn main() {
         .register_callback_session_close(Box::new(callback_session_close))
         .await;
 
+    // First task to initialize the global value
+    let initializer = tokio::spawn(async {
+        initialize_global_value().await;
+    });
+
+    // Wait for the initializer to complete
+    initializer.await.unwrap();
+
     let tx = session.get_tx().await;
     let tx_clone = tx.clone();
     tokio::spawn(async move {
@@ -850,24 +824,30 @@ async fn main() {
         }
     });
 
-    launch_terminal_program(cert.clone(), session.get_tx().await, session.clone()).await;
+    //tokio::spawn(async move {
 
-    tokio::time::sleep(Duration::from_millis(400)).await;
-    match session.serve().await {
-        Ok(_) => {}
-        Err(e) => match e {
-            MessagingError::ZenohError => {
-                terminate(tx).await;
-                println!("Something went wrong with the communication protocol. Check the configuration from Zenoh.");
-                println!("Review your Zenoh configuration file '{}':", zenoh_config);
-                let contents = fs::read_to_string(zenoh_config)
-                    .expect("Something went wrong reading the file");
-                println!("{}", contents);
-                println!(
-                    "Are you perhaps offline, or trying to reach a non-existing Zenoh router?"
-                );
-            }
-            _ => {}
-        },
-    }
+    //});
+
+    let mut session_clone = session.clone();
+    tokio::spawn(async move {
+        let _ = match session_clone.serve().await {
+            Ok(_) => {}
+            Err(e) => match e {
+                MessagingError::ZenohError => {
+                    terminate(tx).await;
+                    println!("Something went wrong with the communication protocol. Check the configuration from Zenoh.");
+                    println!("Review your Zenoh configuration file '{}':", zenoh_config);
+                    let contents = fs::read_to_string(zenoh_config)
+                        .expect("Something went wrong reading the file");
+                    println!("{}", contents);
+                    println!(
+                        "Are you perhaps offline, or trying to reach a non-existing Zenoh router?"
+                    );
+                }
+                _ => {}
+            },
+        };
+    });
+
+    launch_terminal_program(cert.clone(), session.get_tx().await, session.clone()).await;
 }

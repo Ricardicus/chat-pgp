@@ -1,7 +1,6 @@
 use crate::session::messages::{
     MessageListener, Messageble, MessagebleTopicAsync, MessagebleTopicAsyncPublishReads,
-    MessagebleTopicAsyncReadTimeout, MessagingError,
-    SessionMessage,
+    MessagebleTopicAsyncReadTimeout, MessagingError, SessionMessage,
 };
 use crate::session::Session;
 

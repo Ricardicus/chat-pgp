@@ -270,6 +270,13 @@ impl SessionMessage {
         }
     }
 
+    pub fn new_from_data(id: String, data: MessageData) -> Self {
+        SessionMessage {
+            message: data.clone(),
+            session_id: id,
+        }
+    }
+
     pub fn serialize(&self) -> Result<String, serde_json::Error> {
         // Convert the message to a JSON string
         let json = serde_json::to_string(self)?;
@@ -280,10 +287,17 @@ impl SessionMessage {
         Ok(encoded)
     }
 
-    pub fn deserialize(encoded_message: &str) -> Result<Self, Box<dyn std::error::Error>> {
-        let bytes = base64::decode(encoded_message)?;
-        let message = serde_json::from_slice(&bytes)?;
-        Ok(message)
+    pub fn deserialize(encoded_message: &str) -> Result<Self, ()> {
+        let bytes = base64::decode(encoded_message);
+        if bytes.is_err() {
+            return Err(());
+        }
+        let bytes = bytes.unwrap();
+        let message = serde_json::from_slice(&bytes);
+        if message.is_err() {
+            return Err(());
+        }
+        Ok(message.unwrap())
     }
 
     pub fn to_string(&self) -> String {
