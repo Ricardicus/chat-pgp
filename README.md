@@ -20,7 +20,7 @@ so that one does not have to rely on routers and peers someone else setup for
 this project. There is support for TLS (one- and two-way) authentication in zenoh.
 
 By default, I have set up a router running on a Digital Ocean Droplet, in a server they claim to be running in Amsterdam.
-Starting a zenoh router is very simple. I just launch the zenoh daemon, zenohd.
+Starting a zenoh router is very simple. I just launch the zenoh daemon, [zenohd](https://zenoh.io/docs/getting-started/installation/).
 You can provide your own router configuration by passing the "-z" flag to the program.
 By default, however, the client program will connect with other peers via this aforementioned router as specified in [zenoh/config.json5](https://github.com/Ricardicus/chat-pgp/blob/master/zenoh/config.json5): 
 ```bash
