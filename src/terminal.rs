@@ -163,11 +163,18 @@ impl WindowManager {
 }
 
 #[derive(Clone)]
+enum TextStyle {
+    Italic,
+    Bold,
+    Normal,
+}
+
+#[derive(Clone)]
 struct AppState {
     pub input: String,
     pub input_mode: InputMode,
     pub character_index: usize,
-    pub messages: Vec<String>,
+    pub messages: Vec<(String, TextStyle)>,
     pub chat_messages: Vec<String>,
     pub chatid: String,
 }
@@ -332,24 +339,25 @@ impl App {
         let state = self.state.lock().await;
         state.input.chars().count()
     }
-    async fn write_new_message(&mut self, message: String) {
+    async fn write_new_message(&mut self, message: String, style: TextStyle) {
         let mut state = self.state.lock().await;
-        state.messages.push(message);
+        state.messages.push((message, style));
     }
     async fn write_chat_new_message(&mut self, chatid: String, message: String) {
         let mut state = self.state.lock().await;
         state.chatid = chatid;
         state.chat_messages.push(message);
     }
-    async fn set_last_message(&mut self, window: usize, message: String) {
+    async fn set_last_message(&mut self, window: usize, message: String, style: TextStyle) {
         let mut state = self.state.lock().await;
         if state.messages.len() > 0 {
             if let Some(last) = state.messages.last_mut() {
                 // Append the string `s1` to the String part of the last element
-                last.push_str(&message);
+                last.0.push_str(&message);
+                last.1 = style;
             }
         } else {
-            state.messages.push(message);
+            state.messages.push((message, style));
         }
     }
 
@@ -376,13 +384,14 @@ impl App {
                     Ok(Ok(command)) => {
                         match command {
                             WindowCommand::Print(cmd) => {
-                                app.set_last_message(cmd.window, cmd.message).await;
+                                app.set_last_message(cmd.window, cmd.message, TextStyle::Normal)
+                                    .await;
                             }
                             WindowCommand::Println(cmd) => {
-                                app.write_new_message(cmd.message).await;
+                                app.write_new_message(cmd.message, TextStyle::Normal).await;
                             }
                             WindowCommand::ChatClosed(cmd) => {
-                                app.write_new_message(cmd.message).await;
+                                app.write_new_message(cmd.message, TextStyle::Bold).await;
                                 app.clear_chat().await;
                             }
                             WindowCommand::PrintChat(cmd) => {
@@ -567,7 +576,19 @@ impl App {
             let messages: Vec<ListItem> = messages
                 .iter()
                 .map(|m| {
-                    let content = Line::from(Span::raw(format!("{m}")));
+                    let message = &m.0;
+                    let style = &m.1;
+                    let mut s = Span::raw(format!("{message}"));
+                    match style {
+                        TextStyle::Normal => {}
+                        TextStyle::Italic => {
+                            s = s.italic();
+                        }
+                        TextStyle::Bold => {
+                            s = s.bold();
+                        }
+                    }
+                    let content = Line::from(s);
                     ListItem::new(content)
                 })
                 .collect();
