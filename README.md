@@ -10,18 +10,6 @@ Each chat session is encrypted using a symmectrical ChaCha20Poly1305 algorithm
 with a shared secret that is protected with PGP assymetrical
 encryption. If you are unfamiliar with OpenPGP and using GnuPG then see this [GnuPG guide](https://www.gnupg.org/gph/en/manual/c14.html). 
 
-# Build and run
-
-The entry point is the "client" program. It is a program implemented in Rust which can be built with cargo.
-If you want to build and run with a gpg key with fingerprint D54FED01913E2120AD9DB3CBB0726D4781F979F7, then do this:
-
-```bash
- cargo build --release
-./target/release/client --gpgkey D54FED01913E2120AD9DB3CBB0726D4781F979F7
-```
-
-If you don't have a gpg-key already, the program will generate one for you with the user id of "chatpgp@example.org". 
-
 ## Communication
 
 The communication protocol is built on [Zenoh](https://github.com/eclipse-zenoh/zenoh).
@@ -50,6 +38,20 @@ You can also configure the base TCP/IP connection to be secured with TLS with yo
 ```bash
 ./target/release/client -z zenoh/your-config.json5
 ```
+
+
+## Build and run
+
+The entry point is the "client" program. It is a program implemented in Rust which can be built with cargo.
+If you want to build and run with a gpg key with fingerprint D54FED01913E2120AD9DB3CBB0726D4781F979F7, then do this:
+
+```bash
+ cargo build --release
+./target/release/client --gpgkey D54FED01913E2120AD9DB3CBB0726D4781F979F7
+```
+
+If you don't have a gpg-key already, the program will generate one for you with the user id of "chatpgp@example.org". 
+
 
 ## Work in progress
 
