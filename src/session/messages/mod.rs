@@ -253,6 +253,13 @@ impl SessionMessage {
         }
     }
 
+    pub fn new_from_data(id: String, data: MessageData) -> Self {
+        SessionMessage {
+            message: data.clone(),
+            session_id: id,
+        }
+    }
+
     pub fn serialize(&self) -> Result<String, serde_json::Error> {
         // Convert the message to a JSON string
         let json = serde_json::to_string(self)?;

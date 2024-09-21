@@ -148,6 +148,14 @@ impl Cryptical for PGPEnDeCrypt {
         self.cert.fingerprint().to_string()
     }
 }
+impl Cryptical for PGPEnCryptOwned {
+    fn get_public_key_as_base64(&self) -> String {
+        pgp::get_public_key_as_base64(self.cert.clone())
+    }
+    fn get_public_key_fingerprint(&self) -> String {
+        self.cert.fingerprint().to_string()
+    }
+}
 impl CrypticalID for PGPEnDeCrypt {
     fn get_userid(&self) -> String {
         let mut userid = "".to_string();
@@ -228,6 +236,15 @@ impl CrypticalID for PGPEnCryptOwned {
         return userid;
     }
 }
+impl CrypticalID for &PGPEnCryptOwned {
+    fn get_userid(&self) -> String {
+        let mut userid = "".to_string();
+        for uid in self.cert.userids() {
+            userid.push_str(&uid.userid().to_string());
+        }
+        return userid;
+    }
+}
 
 impl CrypticalEncrypt for PGPEnCryptOwned {
     fn encrypt(&self, input: &str) -> Result<String, String> {
@@ -242,7 +259,7 @@ impl CrypticalEncrypt for PGPEnCryptOwned {
 }
 
 // Implement the Cryptical trait for PGPEnDeCrypt
-impl Cryptical for PGPEnCryptOwned {
+impl Cryptical for &PGPEnCryptOwned {
     fn get_public_key_as_base64(&self) -> String {
         pgp::get_public_key_as_base64(self.cert.clone())
     }

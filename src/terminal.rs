@@ -6,6 +6,9 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex, Notify, OnceCell, Semaphore};
 use tokio::time::{timeout, Duration};
 
+use crate::session::crypto::{Cryptical, CrypticalID};
+use crate::util::get_current_datetime;
+
 use color_eyre::Result;
 use ratatui::{
     crossterm::event::{self, Event, KeyCode, KeyEventKind},
@@ -19,7 +22,6 @@ use ratatui::{
 use serde::{Deserialize, Serialize};
 
 pub struct WindowManager {
-    windows: HashMap<usize, (WINDOW, WINDOW)>,
     keep_running: Arc<Mutex<bool>>,
     pipe: WindowPipe<WindowCommand>,
     ratatui_thread: Option<tokio::task::JoinHandle<()>>,
@@ -35,6 +37,7 @@ pub struct PrintCommand {
 }
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct PrintChatCommand {
+    pub chatid: String,
     pub message: String,
 }
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -100,7 +103,6 @@ impl<T> WindowPipe<T> {
 impl WindowManager {
     pub fn new() -> Self {
         WindowManager {
-            windows: HashMap::new(),
             keep_running: Arc::new(Mutex::new(true)),
             pipe: WindowPipe::new(),
             ratatui_thread: None,
@@ -162,6 +164,8 @@ struct AppState {
     pub input_mode: InputMode,
     pub character_index: usize,
     pub messages: Vec<String>,
+    pub chat_messages: Vec<String>,
+    pub chatid: String,
 }
 
 /// App holds the state of the application
@@ -185,6 +189,8 @@ impl App {
                 input_mode: InputMode::Normal,
                 character_index: 0,
                 messages: Vec::new(),
+                chat_messages: Vec::new(),
+                chatid: "Nobody".to_string(),
             })),
             should_run: Arc::new(Mutex::new(true)),
             tx: tx,
@@ -243,28 +249,19 @@ impl App {
                 is_not_cursor_leftmost = state.character_index != 0
             };
             if is_not_cursor_leftmost {
-                // Method "remove" is not used on the saved text for deleting the selected char.
-                // Reason: Using remove on String works on bytes instead of the chars.
-                // Using remove would require special care because of char boundaries.
-
                 let current_index;
                 {
                     current_index = state.character_index;
                 }
                 let from_left_to_current_index = current_index - 1;
-
-                // Getting all characters before the selected character.
-                let mut input;
+                let input;
                 {
                     input = state.input.clone();
                 }
                 len = Some(input.len());
                 let before_char_to_delete = input.chars().take(from_left_to_current_index);
-                // Getting all characters after selected character.
                 let after_char_to_delete = input.chars().skip(current_index);
 
-                // Put all characters together except the selected one.
-                // By leaving the selected one out, it is forgotten and therefore deleted.
                 {
                     state.input = before_char_to_delete.chain(after_char_to_delete).collect();
                 }
@@ -326,9 +323,14 @@ impl App {
         let state = self.state.lock().await;
         state.input.chars().count()
     }
-    async fn write_new_message(&mut self, window: usize, message: String) {
+    async fn write_new_message(&mut self, message: String) {
         let mut state = self.state.lock().await;
         state.messages.push(message);
+    }
+    async fn write_chat_new_message(&mut self, chatid: String, message: String) {
+        let mut state = self.state.lock().await;
+        state.chatid = chatid;
+        state.chat_messages.push(message);
     }
     async fn set_last_message(&mut self, window: usize, message: String) {
         let mut state = self.state.lock().await;
@@ -368,7 +370,10 @@ impl App {
                                 app.set_last_message(cmd.window, cmd.message).await;
                             }
                             WindowCommand::Println(cmd) => {
-                                app.write_new_message(cmd.window, cmd.message).await;
+                                app.write_new_message(cmd.message).await;
+                            }
+                            WindowCommand::PrintChat(cmd) => {
+                                app.write_chat_new_message(cmd.chatid, cmd.message).await;
                             }
                             /*WindowCommand::Read(cmd) => {
                                 app.write_new_message(cmd.window, cmd.prompt).await;
@@ -395,7 +400,7 @@ impl App {
                 send_app_state(app.get_state().await).await;
             }
         });
-        let mut app = self.clone();
+        let app = self.clone();
         let h1 = tokio::spawn(async move {
             let mut should_run;
             {
@@ -403,12 +408,8 @@ impl App {
             }
             while should_run {
                 let state = read_app_state().await.unwrap();
-                let messages = state.messages;
-                let input = state.input;
-                let input_mode = state.input_mode;
-                let character_index = state.character_index;
-                let _ = terminal
-                    .draw(|frame| App::draw(frame, messages, input_mode, input, character_index));
+
+                let _ = terminal.draw(|frame| App::draw(frame, state));
                 {
                     should_run = app.should_run().await;
                 }
@@ -446,7 +447,7 @@ impl App {
                     }
                     match input_mode {
                         InputMode::Normal => match key.code {
-                            KeyCode::Char('e') => {
+                            KeyCode::Char(' ') => {
                                 app.set_input_mode(InputMode::Editing).await;
                             }
                             KeyCode::Char('q') => {
@@ -484,80 +485,148 @@ impl App {
         h3.await.unwrap();
     }
 
-    fn draw(
-        frame: &mut Frame,
-        messages: Vec<String>,
-        input_mode: InputMode,
-        input: String,
-        character_index: usize,
-    ) {
-        let vertical = Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Length(3),
-            Constraint::Min(1),
-        ]);
-        let [help_area, input_area, messages_area] = vertical.areas(frame.area());
-        if messages.len() > 0 {
+    fn draw(frame: &mut Frame, state: AppState) {
+        let messages = state.messages;
+        let input = state.input;
+        let input_mode = state.input_mode;
+        let character_index = state.character_index;
+        let chat_messages = state.chat_messages;
+        let chatid = state.chatid;
+        if chat_messages.len() == 0 {
+            let vertical = Layout::vertical([
+                Constraint::Length(1),
+                Constraint::Length(3),
+                Constraint::Min(1),
+            ]);
+            let [help_area, input_area, messages_area] = vertical.areas(frame.area());
+            if messages.len() > 0 {
+            } else {
+            }
+            let (msg, style) = match input_mode {
+                InputMode::Normal => (
+                    vec![
+                        "Press ".into(),
+                        "q".bold(),
+                        " to exit, ".into(),
+                        "Space".bold(),
+                        " to write".into(),
+                    ],
+                    Style::default().add_modifier(Modifier::RAPID_BLINK),
+                ),
+                InputMode::Editing => (
+                    vec![
+                        "Press ".into(),
+                        "Esc".bold(),
+                        " to stop editing, ".into(),
+                        "Enter".bold(),
+                        " to submit the message".into(),
+                    ],
+                    Style::default(),
+                ),
+            };
+            let text = Text::from(Line::from(msg)).patch_style(style);
+            let help_message = Paragraph::new(text);
+            frame.render_widget(help_message, help_area);
+
+            let input = Paragraph::new(input.as_str())
+                .style(match input_mode {
+                    InputMode::Normal => Style::default(),
+                    InputMode::Editing => Style::default().fg(Color::Yellow),
+                })
+                .block(Block::bordered().title("Input"));
+            frame.render_widget(input, input_area);
+            match input_mode {
+                // Hide the cursor. `Frame` does this by default, so we don't need to do anything here
+                InputMode::Normal => {}
+
+                // Make the cursor visible and ask ratatui to put it at the specified coordinates after
+                // rendering
+                #[allow(clippy::cast_possible_truncation)]
+                InputMode::Editing => frame.set_cursor_position(Position::new(
+                    // Draw the cursor at the current position in the input field.
+                    // This position is can be controlled via the left and right arrow key
+                    input_area.x + character_index as u16 + 1,
+                    // Move one line down, from the border to the input line
+                    input_area.y + 1,
+                )),
+            }
+
+            let messages: Vec<ListItem> = messages
+                .iter()
+                .map(|m| {
+                    let content = Line::from(Span::raw(format!("{m}")));
+                    ListItem::new(content)
+                })
+                .collect();
+            let messages = List::new(messages).block(Block::bordered().title("Commands"));
+            frame.render_widget(messages, messages_area);
         } else {
+            let vertical = Layout::vertical([
+                Constraint::Min(1),
+                Constraint::Length(1),
+                Constraint::Length(3),
+            ]);
+            let [chat_area, help_area, input_area] = vertical.areas(frame.area());
+            let (msg, style) = match input_mode {
+                InputMode::Normal => (
+                    vec![
+                        "Press ".into(),
+                        "q".bold(),
+                        " to exit, ".into(),
+                        "e".bold(),
+                        " to write".into(),
+                    ],
+                    Style::default().add_modifier(Modifier::RAPID_BLINK),
+                ),
+                InputMode::Editing => (
+                    vec![
+                        "Press ".into(),
+                        "Esc".bold(),
+                        " to stop editing, ".into(),
+                        "Enter".bold(),
+                        " to submit the message".into(),
+                    ],
+                    Style::default(),
+                ),
+            };
+            let text = Text::from(Line::from(msg)).patch_style(style);
+            let help_message = Paragraph::new(text);
+            frame.render_widget(help_message, help_area);
+
+            let input = Paragraph::new(input.as_str())
+                .style(match input_mode {
+                    InputMode::Normal => Style::default(),
+                    InputMode::Editing => Style::default().fg(Color::Yellow),
+                })
+                .block(Block::bordered().title("Input"));
+            frame.render_widget(input, input_area);
+            match input_mode {
+                // Hide the cursor. `Frame` does this by default, so we don't need to do anything here
+                InputMode::Normal => {}
+
+                // Make the cursor visible and ask ratatui to put it at the specified coordinates after
+                // rendering
+                #[allow(clippy::cast_possible_truncation)]
+                InputMode::Editing => frame.set_cursor_position(Position::new(
+                    // Draw the cursor at the current position in the input field.
+                    // This position is can be controlled via the left and right arrow key
+                    input_area.x + character_index as u16 + 1,
+                    // Move one line down, from the border to the input line
+                    input_area.y + 1,
+                )),
+            }
+
+            let messages: Vec<ListItem> = chat_messages
+                .iter()
+                .map(|m| {
+                    let content = Line::from(Span::raw(format!("{m}")));
+                    ListItem::new(content)
+                })
+                .collect();
+            let messages =
+                List::new(messages).block(Block::bordered().title(format!("Chat with {}", chatid)));
+            frame.render_widget(messages, chat_area);
         }
-        let (msg, style) = match input_mode {
-            InputMode::Normal => (
-                vec![
-                    "Press ".into(),
-                    "q".bold(),
-                    " to exit, ".into(),
-                    "e".bold(),
-                    " to write".into(),
-                ],
-                Style::default().add_modifier(Modifier::RAPID_BLINK),
-            ),
-            InputMode::Editing => (
-                vec![
-                    "Press ".into(),
-                    "Esc".bold(),
-                    " to stop editing, ".into(),
-                    "Enter".bold(),
-                    " to submit the message".into(),
-                ],
-                Style::default(),
-            ),
-        };
-        let text = Text::from(Line::from(msg)).patch_style(style);
-        let help_message = Paragraph::new(text);
-        frame.render_widget(help_message, help_area);
-
-        let input = Paragraph::new(input.as_str())
-            .style(match input_mode {
-                InputMode::Normal => Style::default(),
-                InputMode::Editing => Style::default().fg(Color::Yellow),
-            })
-            .block(Block::bordered().title("Input"));
-        frame.render_widget(input, input_area);
-        match input_mode {
-            // Hide the cursor. `Frame` does this by default, so we don't need to do anything here
-            InputMode::Normal => {}
-
-            // Make the cursor visible and ask ratatui to put it at the specified coordinates after
-            // rendering
-            #[allow(clippy::cast_possible_truncation)]
-            InputMode::Editing => frame.set_cursor_position(Position::new(
-                // Draw the cursor at the current position in the input field.
-                // This position is can be controlled via the left and right arrow key
-                input_area.x + character_index as u16 + 1,
-                // Move one line down, from the border to the input line
-                input_area.y + 1,
-            )),
-        }
-
-        let messages: Vec<ListItem> = messages
-            .iter()
-            .map(|m| {
-                let content = Line::from(Span::raw(format!("{m}")));
-                ListItem::new(content)
-            })
-            .collect();
-        let messages = List::new(messages).block(Block::bordered().title("Messages"));
-        frame.render_widget(messages, messages_area);
     }
 }
 
@@ -577,4 +646,35 @@ pub async fn read_app_state() -> Result<AppState, ()> {
 
 async fn send_app_state(state: AppState) {
     let _ = STATE.get().unwrap().send(state).await;
+}
+
+fn short_fingerprint(fingerprint: &str) -> String {
+    if fingerprint.len() > 8 {
+        let first_four = &fingerprint[0..4];
+        let last_four = &fingerprint[fingerprint.len() - 4..];
+        format!("{}...{}", first_four, last_four)
+    } else {
+        fingerprint.to_string()
+    }
+}
+
+pub fn format_chat_msg<P: CrypticalID + Cryptical>(message: &str, encro: &P) -> (String, String) {
+    format_chat_msg_fmt(
+        message,
+        &encro.get_userid(),
+        &encro.get_public_key_fingerprint(),
+    )
+}
+
+pub fn format_chat_msg_fmt(message: &str, userid: &str, fingerprint: &str) -> (String, String) {
+    let time = get_current_datetime();
+    let chat_view = format!(
+        "{} - {} ({}): {}",
+        time,
+        userid,
+        short_fingerprint(fingerprint),
+        message
+    );
+    let chat_id = userid.to_string();
+    (chat_id, chat_view)
 }

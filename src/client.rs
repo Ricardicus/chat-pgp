@@ -14,9 +14,11 @@ use std::io;
 use std::pin::Pin;
 use std::process::exit;
 use std::sync::Arc;
-use tokio::sync::mpsc;
-use tokio::sync::OnceCell;
+use tokio::sync::{mpsc, Mutex, OnceCell};
 use tokio::time::{timeout, Duration};
+
+use zenoh::prelude::r#async::*;
+use zenoh::Config;
 
 mod util;
 
@@ -33,7 +35,8 @@ use ncurses::*;
 
 mod terminal;
 use terminal::{
-    NewWindowCommand, PrintCommand, ReadCommand, WindowCommand, WindowManager, WindowPipe,
+    format_chat_msg, format_chat_msg_fmt, NewWindowCommand, PrintChatCommand, PrintCommand,
+    ReadCommand, WindowCommand, WindowManager, WindowPipe,
 };
 
 use session::middleware::{ZMQHandler, ZenohHandler};
@@ -67,20 +70,25 @@ struct Cli {
 static PIPE: OnceCell<WindowPipe<WindowCommand>> = OnceCell::const_new();
 
 async fn println_message(window: usize, message: String) {
-    unsafe {
-        PIPE.get()
-            .unwrap()
-            .send(WindowCommand::Println(PrintCommand { window, message }))
-            .await;
-    }
+    PIPE.get()
+        .unwrap()
+        .send(WindowCommand::Println(PrintCommand { window, message }))
+        .await;
+}
+async fn println_chat_message(chatid: String, message: String) {
+    PIPE.get()
+        .unwrap()
+        .send(WindowCommand::PrintChat(PrintChatCommand {
+            chatid,
+            message,
+        }))
+        .await;
 }
 async fn print_message(window: usize, message: String) {
-    unsafe {
-        PIPE.get()
-            .unwrap()
-            .send(WindowCommand::Print(PrintCommand { window, message }))
-            .await;
-    }
+    PIPE.get()
+        .unwrap()
+        .send(WindowCommand::Print(PrintCommand { window, message }))
+        .await;
 }
 async fn read_message(
     window: usize,
@@ -90,13 +98,7 @@ async fn read_message(
 ) -> Result<String, ()> {
     Ok("".to_string())
 }
-async fn read_chat_message(window: usize) -> Result<Option<String>, ()> {
-    let mut input = Err(());
-    unsafe {
-        //input = PIPE.get().unwrap().get_chat_input().await;
-    }
-    input
-}
+
 async fn send_chat_message(window: usize, message: Option<String>) {
     unsafe {
         //PIPE.get().unwrap().tx_chat_input(message).await;
@@ -195,16 +197,6 @@ impl InputCommand {
     }
 }
 
-fn short_fingerprint(fingerprint: &str) -> String {
-    if fingerprint.len() > 8 {
-        let first_four = &fingerprint[0..4];
-        let last_four = &fingerprint[fingerprint.len() - 4..];
-        format!("{}...{}", first_four, last_four)
-    } else {
-        fingerprint.to_string()
-    }
-}
-
 async fn cb_chat(public_key: String, message: String) {
     let pub_key_decoded = match base64::decode(public_key) {
         Err(_) => {
@@ -214,16 +206,8 @@ async fn cb_chat(public_key: String, message: String) {
     };
     match PGPEnCryptOwned::new_from_vec(&pub_key_decoded) {
         Ok(pub_encro) => {
-            println_message(
-                0,
-                format!(
-                    "{} ({}): {}",
-                    pub_encro.get_userid(),
-                    short_fingerprint(&pub_encro.get_public_key_fingerprint()),
-                    message
-                ),
-            )
-            .await;
+            let (chat_id, chat_view) = format_chat_msg(&message, &pub_encro);
+            println_chat_message(chat_id, chat_view).await;
         }
         _ => {}
     }
@@ -405,6 +389,11 @@ async fn launch_terminal_program(
     pipe.send(WindowCommand::Init()).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
+    let zc = session.middleware_config.clone();
+    let zenoh_config = Config::from_file(zc).unwrap();
+    let zenoh_session = Arc::new(Mutex::new(zenoh::open(zenoh_config).res().await.unwrap()));
+    let zenoh_handler = ZenohHandler::new(zenoh_session);
+
     let pgp_handler = PGPEnDeCrypt::new_no_certpass(cert.clone());
 
     // Launch window manager program
@@ -470,11 +459,6 @@ async fn launch_terminal_program(
                 }
             }
         } else {
-            /*if print_prompt {
-                input = read_message(1, "", &upper_prompt, 1).await;
-            } else {
-                input = read_message(1, "", &upper_prompt, 1).await;
-            }*/
             let timeout_duration = Duration::from_secs(1);
             let input = timeout(timeout_duration, rx.recv()).await;
             if input.is_err() {
@@ -602,7 +586,43 @@ async fn launch_terminal_program(
                     None => {
                         // Send this input to listeners
                         if input.len() > 0 && session.get_number_of_sessions().await > 0 {
-                            send_chat_message(1, Some(input)).await;
+                            // FOR NOW: Only one session to send at a time...
+                            let id = session.get_session_ids().await[0].clone();
+                            let other_pub_key = session.get_pub_key_from_session_id(&id).await;
+                            if other_pub_key.is_ok() {
+                                let other_pub_key = other_pub_key.unwrap();
+                                let pub_key_decoded = match base64::decode(other_pub_key) {
+                                    Err(_) => Err(()),
+                                    Ok(pub_key) => Ok(pub_key),
+                                };
+                                if pub_key_decoded.is_ok() {
+                                    let pub_key_decoded = pub_key_decoded.unwrap();
+                                    match PGPEnCryptOwned::new_from_vec(&pub_key_decoded) {
+                                        Ok(pub_encro) => {
+                                            let fingerprint =
+                                                pub_encro.get_public_key_fingerprint();
+                                            let topic_out = Topic::messaging_topic_in(&fingerprint);
+                                            let msg = SessionMessage::new_chat(input.clone());
+                                            let _ = session
+                                                .session_send_msg(
+                                                    &id,
+                                                    msg,
+                                                    &topic_out,
+                                                    &zenoh_handler,
+                                                )
+                                                .await;
+                                            let fingerprint = session.get_fingerprint().await;
+                                            let userid = session.get_userid().await;
+
+                                            let (chat_id, chat_view) =
+                                                format_chat_msg_fmt(&input, &userid, &fingerprint);
+
+                                            println_chat_message(chat_id, chat_view).await;
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
                         }
                     }
                 }

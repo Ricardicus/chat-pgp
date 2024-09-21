@@ -16,7 +16,7 @@ use protocol::*;
 
 use crypto::{
     sha256sum, ChaCha20Poly1305EnDeCrypt, Cryptical, CrypticalDecrypt, CrypticalEncrypt,
-    CrypticalSign, CrypticalVerify, PGPEnCryptOwned, PGPEnDeCrypt,
+    CrypticalID, CrypticalSign, CrypticalVerify, PGPEnCryptOwned, PGPEnDeCrypt,
 };
 
 use messages::MessageData::{
@@ -337,21 +337,22 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
         })
     }
 
-    pub async fn session_send_msg<T: Messageble>(
+    pub async fn session_send_msg<T: MessagebleTopicAsync + MessagebleTopicAsyncReadTimeout>(
         &mut self,
         session_id: &str,
         msg: Message,
-        msgable: &T,
+        topic: &str,
+        gateway: &T,
     ) -> Result<(), MessagingError> {
         match self.encrypt_msg(session_id, &msg).await {
             Ok(msg) => {
-                match msgable.send_message(Message {
-                    message: MessageData::Encrypted(msg),
-                    session_id: session_id.to_string(),
-                }) {
-                    Ok(_) => Ok(()),
-                    Err(e) => Err(e),
-                }
+                return self
+                    .send(
+                        Message::new_from_data(session_id.to_string(), MessageData::Encrypted(msg)),
+                        topic,
+                        gateway,
+                    )
+                    .await;
             }
             Err(err) => Err(err),
         }
@@ -536,7 +537,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
             let zc = self.middleware_config.clone();
 
             let terminate_callbacks = self.callbacks_terminate.clone();
-            let mut running = self.running.clone();
+            let running = self.running.clone();
             let h = tokio::spawn(async move {
                 let zenoh_config = Config::from_file(zc).unwrap();
                 let zenoh_session = zenoh::open(zenoh_config.clone()).res().await;
@@ -587,28 +588,43 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
         let tx_clone = self.tx_chat.clone();
         self.serve_topics(topics, &tx_clone, false).await;
 
-        let other_key_fingerprint: String = other_key_fingerprint.to_string();
-
-        let callbacks = self.callbacks_chat_input.clone();
+        let callbacks = self.callbacks_chat.clone();
         let running = self.running.clone();
         let rx_chat = self.rx_chat.clone();
+        let rx_session = self.clone();
         let h = tokio::spawn(async move {
             let mut keep_running = *running.lock().await;
             while keep_running {
                 let input = rx_chat.lock().await.recv().await;
                 if input.is_some() {
-                    let input = input.unwrap().1;
-
-                    let callbacks = callbacks.lock().await;
-                    for callback in callbacks.iter() {
-                        if let Some((topic, msg)) = callback(
-                            other_key.clone(),
-                            session_id.clone(),
-                            topic_out.clone(),
-                            input.clone(),
-                        )
-                        .await
-                        {}
+                    let (_, msg) = input.unwrap();
+                    let mut message_received: Option<String> = None;
+                    match Message::deserialize(&msg) {
+                        Ok(msg) => match msg.message {
+                            Encrypted(msg) => {
+                                match rx_session
+                                    .decrypt_encrypted_msg(session_id.clone(), msg)
+                                    .await
+                                {
+                                    Ok(msg) => match msg.message {
+                                        Chat(msg) => {
+                                            message_received = Some(msg.message);
+                                        }
+                                        _ => {}
+                                    },
+                                    Err(_) => {}
+                                }
+                            }
+                            _ => {}
+                        },
+                        Err(_) => {}
+                    }
+                    if message_received.is_some() {
+                        let message_received = message_received.unwrap();
+                        let callbacks = callbacks.lock().await;
+                        for callback in callbacks.iter() {
+                            callback(other_key.clone(), message_received.clone()).await
+                        }
                     }
                 }
                 {
@@ -826,6 +842,14 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
     pub async fn get_number_of_sessions(&self) -> usize {
         let session = self.sessions.lock().await;
         session.len()
+    }
+    pub async fn get_session_ids(&self) -> Vec<String> {
+        let session = self.sessions.lock().await;
+        let mut ids = Vec::new();
+        for (id, _) in session.iter() {
+            ids.push(id.clone());
+        }
+        ids
     }
 
     pub async fn get_pub_key_from_session_id(&self, session_id: &str) -> Result<String, String> {
@@ -1257,5 +1281,47 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                 })
             }
         }
+    }
+
+    async fn decrypt_encrypted_msg(
+        &self,
+        session_id: String,
+        msg: EncryptedMsg,
+    ) -> Result<Message, SessionErrorMsg> {
+        let sm = &self.sessions.lock().await;
+        let cipher = match sm.get(&session_id) {
+            Some(m) => m.sym_encro.clone(),
+            None => {
+                return Err(SessionErrorMsg {
+                    code: SessionErrorCodes::InvalidMessage as u32,
+                    message: "Invalid session id".to_owned(),
+                });
+            }
+        };
+        let decrypted = match cipher.decrypt(&msg.data) {
+            Ok(res) => res,
+            Err(_) => {
+                return Err(SessionErrorMsg {
+                    code: SessionErrorCodes::Encryption as u32,
+                    message: "Failed to decrypt message".to_owned(),
+                });
+            }
+        };
+        match Message::deserialize(&decrypted) {
+            Ok(m) => return Ok(m),
+            Err(_) => {
+                return Err(SessionErrorMsg {
+                    code: SessionErrorCodes::Serialization as u32,
+                    message: "Failed to parse message".to_owned(),
+                });
+            }
+        }
+    }
+
+    pub async fn get_fingerprint(&self) -> String {
+        self.host_encro.lock().await.get_public_key_fingerprint()
+    }
+    pub async fn get_userid(&self) -> String {
+        self.host_encro.lock().await.get_userid()
     }
 }
