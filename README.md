@@ -69,6 +69,12 @@ Will work on this:
 - Apply local gpg keychain as policy for session key verification
 - PGP session key signed by main key instead of using the main key for each session establishment
 
+Want to add:
+- Group chat (not sure how to implement)
+- Message retrieval after offline (not sure how to implement, possibly write my own router - a lot of considerations)
+
 Please feel free to test and come with feedback. This project is in its early stage
 and I would appreciate contributions if you agree with this vision.
+
+No messages are stored at the moment, it requires both peers 
 
