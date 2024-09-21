@@ -15,9 +15,25 @@ encryption. If you are unfamiliar with OpenPGP and using GnuPG then see this [Gn
 The communication protocol is built on [Zenoh](https://github.com/eclipse-zenoh/zenoh).
 
 Zenoh is an extremely flexible middleware that does not force a network topology onto
-the project. By providing a configuration file to zenoh, one can configure an entire network
-of routers oneself; so that one does not have to rely on routers and peers someone else setup for
+the project. By providing a configuration file to zenoh, one can configure the entire network oneself; 
+so that one does not have to rely on routers and peers someone else setup for
 this project. There is support for TLS (one- and two-way) authentication in zenoh. The default behaviour is desrocbed in the file zenoh/config.json5 . 
+
+By default, I have set up a router running on a Digital Ocean Droplet, in a server they claim to be running in Amsterdam.
+Starting a zenoh router is very simple. I just launch the zenoh daemon, zenohd.
+You can provide your own router configuration by passing the "-z" flag to the program.
+By default, however, the client program will connect with other peers via this aforementioned router as specified in [zenoh/config.json5](https://github.com/Ricardicus/chat-pgp/blob/master/zenoh/config.json5): 
+```bash
+{
+  "mode": "client",
+  "connect": {
+    "endpoints": ["tcp/174.138.5.172:443"]
+  }
+}
+```
+
+What I am writing is that you can launch your own network by installing zenohd and changing the "endpoints" in the configuration file above.
+You can also configure the base TCP/IP connection to be secured with TLS with your own certificates if you want, however, the application level traffic is already encrypted.
 
 ## Work in progress
 
