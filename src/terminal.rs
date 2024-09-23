@@ -178,8 +178,10 @@ struct AppState {
     pub messages: Vec<(String, TextStyle)>,
     pub chat_messages: Vec<String>,
     pub chatid: String,
-    pub vertical_position: usize,
-    pub scrollstate: ScrollbarState,
+    pub vertical_position_chat: usize,
+    pub vertical_position_commands: usize,
+    pub scrollstate_chat: ScrollbarState,
+    pub scrollstate_commands: ScrollbarState,
 }
 
 /// App holds the state of the application
@@ -205,8 +207,10 @@ impl App {
                 messages: Vec::new(),
                 chat_messages: Vec::new(),
                 chatid: "Nobody".to_string(),
-                vertical_position: 0,
-                scrollstate: ScrollbarState::default(),
+                vertical_position_chat: 0,
+                vertical_position_commands: 0,
+                scrollstate_chat: ScrollbarState::default(),
+                scrollstate_commands: ScrollbarState::default(),
             })),
             should_run: Arc::new(Mutex::new(true)),
             tx: tx,
@@ -346,23 +350,46 @@ impl App {
     }
     async fn move_vertical_scroll_down(&mut self) {
         let mut state = self.state.lock().await;
-        state.vertical_position = state.vertical_position.saturating_add(1);
-        state.scrollstate = state.scrollstate.position(state.vertical_position);
+        if state.chat_messages.len() > 0 {
+            state.vertical_position_chat = state.vertical_position_chat.saturating_add(1);
+            state.scrollstate_chat = state
+                .scrollstate_chat
+                .position(state.vertical_position_chat);
+        } else {
+            state.vertical_position_commands = state.vertical_position_commands.saturating_add(1);
+            state.scrollstate_commands = state
+                .scrollstate_commands
+                .position(state.vertical_position_chat);
+        }
     }
     async fn move_vertical_scroll_up(&mut self) {
         let mut state = self.state.lock().await;
-        state.vertical_position = state.vertical_position.saturating_sub(1);
-        state.scrollstate = state.scrollstate.position(state.vertical_position);
+        if state.chat_messages.len() > 0 {
+            state.vertical_position_chat = state.vertical_position_chat.saturating_sub(1);
+            state.scrollstate_chat = state
+                .scrollstate_chat
+                .position(state.vertical_position_chat);
+        } else {
+            state.vertical_position_commands = state.vertical_position_commands.saturating_sub(1);
+            state.scrollstate_commands = state
+                .scrollstate_commands
+                .position(state.vertical_position_chat);
+        }
     }
     async fn write_new_message(&mut self, message: String, style: TextStyle) {
         let mut state = self.state.lock().await;
         state.messages.push((message, style));
+        state.scrollstate_commands = state
+            .scrollstate_commands
+            .content_length(state.messages.len());
     }
     async fn write_chat_new_message(&mut self, chatid: String, message: String) {
         let mut state = self.state.lock().await;
         state.chatid = chatid;
         state.chat_messages.push(message);
-        state.scrollstate = state.scrollstate.content_length(state.chat_messages.len());
+        state.scrollstate_chat = state
+            .scrollstate_chat
+            .content_length(state.chat_messages.len());
     }
     async fn set_last_message(&mut self, window: usize, message: String, style: TextStyle) {
         let mut state = self.state.lock().await;
@@ -582,7 +609,7 @@ impl App {
                 )),
             }
 
-            let messages: Vec<ListItem> = messages
+            let messages: Vec<Line> = messages
                 .iter()
                 .map(|m| {
                     let message = &m.0;
@@ -597,12 +624,25 @@ impl App {
                             s = s.bold();
                         }
                     }
-                    let content = Line::from(s);
-                    ListItem::new(content)
+                    Line::from(s)
                 })
                 .collect();
-            let messages = List::new(messages).block(Block::bordered().title("Commands"));
+            let messages = Paragraph::new(messages)
+                .block(Block::bordered().title("Commands"))
+                .scroll((state.vertical_position_commands.try_into().unwrap(), 0));
+            let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(Some("↑"))
+                .end_symbol(Some("↓"));
             frame.render_widget(messages, messages_area);
+            frame.render_stateful_widget(
+                scrollbar,
+                messages_area.inner(Margin {
+                    // using an inner vertical margin of 1 unit makes the scrollbar inside the block
+                    vertical: 1,
+                    horizontal: 0,
+                }),
+                &mut state.scrollstate_commands,
+            );
         } else {
             let vertical = Layout::vertical([
                 Constraint::Min(1),
@@ -661,12 +701,11 @@ impl App {
 
             let messages: Vec<Line> = chat_messages
                 .iter()
-                .map(|m| {
-                    Line::from(Span::raw(format!("{m}")))
-                })
+                .map(|m| Line::from(Span::raw(format!("{m}"))))
                 .collect();
-            let messages =
-                Paragraph::new(messages).block(Block::bordered().title(format!("Chat with {}", chatid))).scroll((state.vertical_position as u16, 0));
+            let messages = Paragraph::new(messages)
+                .block(Block::bordered().title(format!("Chat with {}", chatid)))
+                .scroll((state.vertical_position_chat.try_into().unwrap(), 0));
 
             let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
                 .begin_symbol(Some("↑"))
@@ -681,7 +720,7 @@ impl App {
                     vertical: 1,
                     horizontal: 0,
                 }),
-                &mut state.scrollstate,
+                &mut state.scrollstate_chat,
             );
         }
     }
