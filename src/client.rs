@@ -180,7 +180,7 @@ impl InputCommand {
         println_message(1, InputCommand::get_small_help()).await;
     }
     fn get_small_help() -> String {
-        "Type !exit to exit and !help for more commands.".to_string()
+        "Welcome to Chat-PGP. Type !help for help.".to_string()
     }
     async fn read_yes_or_no(
         window: usize,
@@ -198,7 +198,7 @@ impl InputCommand {
                 }
             }
         }
-        Ok(true)
+        Ok(false)
     }
 }
 

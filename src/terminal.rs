@@ -12,9 +12,10 @@ use color_eyre::Result;
 use ratatui::{
     crossterm::event::{self, Event, KeyCode, KeyEventKind},
     layout::{Constraint, Layout, Position},
+    prelude::Margin,
     style::{Color, Modifier, Style, Stylize},
     text::{Line, Span, Text},
-    widgets::{Block, List, ListItem, Paragraph},
+    widgets::{Block, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
     DefaultTerminal, Frame,
 };
 
@@ -177,6 +178,8 @@ struct AppState {
     pub messages: Vec<(String, TextStyle)>,
     pub chat_messages: Vec<String>,
     pub chatid: String,
+    pub vertical_position: usize,
+    pub scrollstate: ScrollbarState,
 }
 
 /// App holds the state of the application
@@ -202,6 +205,8 @@ impl App {
                 messages: Vec::new(),
                 chat_messages: Vec::new(),
                 chatid: "Nobody".to_string(),
+                vertical_position: 0,
+                scrollstate: ScrollbarState::default(),
             })),
             should_run: Arc::new(Mutex::new(true)),
             tx: tx,
@@ -339,6 +344,16 @@ impl App {
         let state = self.state.lock().await;
         state.input.chars().count()
     }
+    async fn move_vertical_scroll_down(&mut self) {
+        let mut state = self.state.lock().await;
+        state.vertical_position = state.vertical_position.saturating_add(1);
+        state.scrollstate = state.scrollstate.position(state.vertical_position);
+    }
+    async fn move_vertical_scroll_up(&mut self) {
+        let mut state = self.state.lock().await;
+        state.vertical_position = state.vertical_position.saturating_sub(1);
+        state.scrollstate = state.scrollstate.position(state.vertical_position);
+    }
     async fn write_new_message(&mut self, message: String, style: TextStyle) {
         let mut state = self.state.lock().await;
         state.messages.push((message, style));
@@ -347,6 +362,7 @@ impl App {
         let mut state = self.state.lock().await;
         state.chatid = chatid;
         state.chat_messages.push(message);
+        state.scrollstate = state.scrollstate.content_length(state.chat_messages.len());
     }
     async fn set_last_message(&mut self, window: usize, message: String, style: TextStyle) {
         let mut state = self.state.lock().await;
@@ -381,35 +397,23 @@ impl App {
             while should_run {
                 let timeout_duration = Duration::from_millis(100);
                 match timeout(timeout_duration, pipe.read()).await {
-                    Ok(Ok(command)) => {
-                        match command {
-                            WindowCommand::Print(cmd) => {
-                                app.set_last_message(cmd.window, cmd.message, TextStyle::Normal)
-                                    .await;
-                            }
-                            WindowCommand::Println(cmd) => {
-                                app.write_new_message(cmd.message, TextStyle::Normal).await;
-                            }
-                            WindowCommand::ChatClosed(cmd) => {
-                                app.write_new_message(cmd.message, TextStyle::Bold).await;
-                                app.clear_chat().await;
-                            }
-                            WindowCommand::PrintChat(cmd) => {
-                                app.write_chat_new_message(cmd.chatid, cmd.message).await;
-                            }
-                            /*WindowCommand::Read(cmd) => {
-                                app.write_new_message(cmd.window, cmd.prompt).await;
-                                app.await_submit().await;
-                                let s = app.get_submitted().await;
-                                //send_terminal_input(s.clone()).await;
-                                //pipe.tx_input(s.clone()).await;
-                                app.set_last_message(cmd.window, s).await;
-                            }*/
-                            _ => {}
-                        };
-                        // let state = app.get_state().await;
-                        // send_app_state(state).await;
-                    }
+                    Ok(Ok(command)) => match command {
+                        WindowCommand::Print(cmd) => {
+                            app.set_last_message(cmd.window, cmd.message, TextStyle::Normal)
+                                .await;
+                        }
+                        WindowCommand::Println(cmd) => {
+                            app.write_new_message(cmd.message, TextStyle::Normal).await;
+                        }
+                        WindowCommand::ChatClosed(cmd) => {
+                            app.write_new_message(cmd.message, TextStyle::Bold).await;
+                            app.clear_chat().await;
+                        }
+                        WindowCommand::PrintChat(cmd) => {
+                            app.write_chat_new_message(cmd.chatid, cmd.message).await;
+                        }
+                        _ => {}
+                    },
                     Ok(Err(_)) => {
                         println!("got an error");
                     }
@@ -429,9 +433,9 @@ impl App {
                 should_run = app.should_run().await;
             }
             while should_run {
-                let state = read_app_state().await.unwrap();
+                let mut state = read_app_state().await.unwrap();
 
-                let _ = terminal.draw(|frame| App::draw(frame, state));
+                let _ = terminal.draw(|frame| App::draw(frame, &mut state));
                 {
                     should_run = app.should_run().await;
                 }
@@ -476,6 +480,8 @@ impl App {
                                 app.set_terminate().await;
                                 let _ = tx.send(None).await;
                             }
+                            KeyCode::Up => app.move_vertical_scroll_up().await,
+                            KeyCode::Down => app.move_vertical_scroll_down().await,
                             _ => {}
                         },
                         InputMode::Editing if key.kind == KeyEventKind::Press => {
@@ -485,6 +491,8 @@ impl App {
                                 KeyCode::Char(to_insert) => app.enter_char(to_insert).await,
                                 KeyCode::Backspace => app.delete_char().await,
                                 KeyCode::Left => app.move_cursor_left(len).await,
+                                KeyCode::Up => app.move_vertical_scroll_up().await,
+                                KeyCode::Down => app.move_vertical_scroll_down().await,
                                 KeyCode::Right => app.move_cursor_right(len).await,
                                 KeyCode::Esc => app.set_input_mode(InputMode::Normal).await,
                                 _ => {}
@@ -507,13 +515,14 @@ impl App {
         h3.await.unwrap();
     }
 
-    fn draw(frame: &mut Frame, state: AppState) {
-        let messages = state.messages;
-        let input = state.input;
-        let input_mode = state.input_mode;
+    fn draw(frame: &mut Frame, state: &mut AppState) {
+        let messages = &state.messages;
+        let input = &state.input;
+        let input_mode = &state.input_mode;
         let character_index = state.character_index;
-        let chat_messages = state.chat_messages;
-        let chatid = state.chatid;
+        let chat_messages = &state.chat_messages;
+        let chatid = &state.chatid;
+
         if chat_messages.len() == 0 {
             let vertical = Layout::vertical([
                 Constraint::Length(1),
@@ -650,16 +659,30 @@ impl App {
                 )),
             }
 
-            let messages: Vec<ListItem> = chat_messages
+            let messages: Vec<Line> = chat_messages
                 .iter()
                 .map(|m| {
-                    let content = Line::from(Span::raw(format!("{m}")));
-                    ListItem::new(content)
+                    Line::from(Span::raw(format!("{m}")))
                 })
                 .collect();
             let messages =
-                List::new(messages).block(Block::bordered().title(format!("Chat with {}", chatid)));
+                Paragraph::new(messages).block(Block::bordered().title(format!("Chat with {}", chatid))).scroll((state.vertical_position as u16, 0));
+
+            let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(Some("↑"))
+                .end_symbol(Some("↓"));
+
             frame.render_widget(messages, chat_area);
+
+            frame.render_stateful_widget(
+                scrollbar,
+                chat_area.inner(Margin {
+                    // using an inner vertical margin of 1 unit makes the scrollbar inside the block
+                    vertical: 1,
+                    horizontal: 0,
+                }),
+                &mut state.scrollstate,
+            );
         }
     }
 }
