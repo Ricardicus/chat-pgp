@@ -180,6 +180,8 @@ struct AppState {
     pub chatid: String,
     pub vertical_position_chat: usize,
     pub vertical_position_commands: usize,
+    pub horizontal_position_chat: usize,
+    pub horizontal_position_commands: usize,
     pub scrollstate_chat: ScrollbarState,
     pub scrollstate_commands: ScrollbarState,
 }
@@ -209,6 +211,8 @@ impl App {
                 chatid: "Nobody".to_string(),
                 vertical_position_chat: 0,
                 vertical_position_commands: 0,
+                horizontal_position_chat: 0,
+                horizontal_position_commands: 0,
                 scrollstate_chat: ScrollbarState::default(),
                 scrollstate_commands: ScrollbarState::default(),
             })),
@@ -376,6 +380,24 @@ impl App {
                 .position(state.vertical_position_chat);
         }
     }
+    async fn move_vertical_scroll_left(&mut self) {
+        let mut state = self.state.lock().await;
+        if state.chat_messages.len() > 0 {
+            state.horizontal_position_chat = state.horizontal_position_chat.saturating_sub(1);
+        } else {
+            state.horizontal_position_commands =
+                state.horizontal_position_commands.saturating_sub(1);
+        }
+    }
+    async fn move_vertical_scroll_right(&mut self) {
+        let mut state = self.state.lock().await;
+        if state.chat_messages.len() > 0 {
+            state.horizontal_position_chat = state.horizontal_position_chat.saturating_add(1);
+        } else {
+            state.horizontal_position_commands =
+                state.horizontal_position_commands.saturating_add(1);
+        }
+    }
     async fn write_new_message(&mut self, message: String, style: TextStyle) {
         let mut state = self.state.lock().await;
         state.messages.push((message, style));
@@ -509,6 +531,8 @@ impl App {
                             }
                             KeyCode::Up => app.move_vertical_scroll_up().await,
                             KeyCode::Down => app.move_vertical_scroll_down().await,
+                            KeyCode::Left => app.move_vertical_scroll_left().await,
+                            KeyCode::Right => app.move_vertical_scroll_right().await,
                             _ => {}
                         },
                         InputMode::Editing if key.kind == KeyEventKind::Press => {
@@ -629,7 +653,10 @@ impl App {
                 .collect();
             let messages = Paragraph::new(messages)
                 .block(Block::bordered().title("Commands"))
-                .scroll((state.vertical_position_commands.try_into().unwrap(), 0));
+                .scroll((
+                    state.vertical_position_commands.try_into().unwrap(),
+                    state.horizontal_position_chat.try_into().unwrap(),
+                ));
             let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
                 .begin_symbol(Some("↑"))
                 .end_symbol(Some("↓"));
@@ -705,7 +732,10 @@ impl App {
                 .collect();
             let messages = Paragraph::new(messages)
                 .block(Block::bordered().title(format!("Chat with {}", chatid)))
-                .scroll((state.vertical_position_chat.try_into().unwrap(), 0));
+                .scroll((
+                    state.vertical_position_chat.try_into().unwrap(),
+                    state.horizontal_position_chat.try_into().unwrap(),
+                ));
 
             let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
                 .begin_symbol(Some("↑"))
