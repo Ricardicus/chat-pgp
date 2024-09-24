@@ -673,7 +673,7 @@ async fn launch_terminal_program(
 
 async fn initialize_global_value() {
     // Directly initialize the GLOBAL_VALUE using `init`
-    PIPE.set(WindowPipe::new());
+    let _ = PIPE.set(WindowPipe::new());
 }
 
 #[tokio::main]
@@ -724,7 +724,7 @@ async fn main() {
             tokio::time::sleep(Duration::from_millis(3000)).await;
             session_clone.stop_session().await;
         });
-        session.serve().await;
+        let _ = session.serve().await;
         let discovered = session.get_discovered().await;
         if discovered.len() > 0 {
             exit(0);
@@ -741,7 +741,7 @@ async fn main() {
             session_clone.stop_session().await;
         });
 
-        session.serve().await;
+        let _ = session.serve().await;
         let discovered = session.get_discovered().await;
         if discovered.len() > 0 {
             exit(0);

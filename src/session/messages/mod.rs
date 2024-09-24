@@ -1,3 +1,5 @@
+use crate::session::protocol::challenge_len;
+use crate::util::generate_random_string;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
@@ -10,6 +12,7 @@ pub enum EncryptionType {
 pub struct InitMsg {
     pub pub_key: String,
     pub signature: String,
+    pub challenge: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -17,6 +20,7 @@ pub struct InitOkMsg {
     pub sym_key_encrypted: String,
     pub pub_key: String,
     pub orig_pub_key: String,
+    pub challenge_sig: String,
 }
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct InitAwaitMsg {
@@ -192,19 +196,30 @@ pub trait MessagebleTopicAsyncPublishReads {
 }
 
 impl SessionMessage {
-    pub fn new_init(pub_key: String, signature: String) -> Self {
+    pub fn new_init(pub_key: String, signature: String, challenge: &mut String) -> Self {
+        *challenge = generate_random_string(challenge_len());
         SessionMessage {
-            message: MessageData::Init(InitMsg { pub_key, signature }),
+            message: MessageData::Init(InitMsg {
+                pub_key,
+                signature,
+                challenge: challenge.clone(),
+            }),
             session_id: "".to_string(),
         }
     }
 
-    pub fn new_init_ok(sym_key_encrypted: String, pub_key: String, orig_pub_key: String) -> Self {
+    pub fn new_init_ok(
+        sym_key_encrypted: String,
+        pub_key: String,
+        orig_pub_key: String,
+        challenge_sig: String,
+    ) -> Self {
         SessionMessage {
             message: MessageData::InitOk(InitOkMsg {
                 sym_key_encrypted,
                 pub_key,
                 orig_pub_key,
+                challenge_sig,
             }),
             session_id: "".to_string(),
         }

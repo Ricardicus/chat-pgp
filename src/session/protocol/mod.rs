@@ -14,13 +14,13 @@ impl Topic {
     // Method to convert enum to its string representation
     pub fn as_str(&self) -> &'static str {
         match self {
-            Topic::Initialize => "session/initialize",
-            Topic::Discover => "session/discover",
-            Topic::Message => "session/message",
-            Topic::Errors => "errors",
-            Topic::Internal => "internal",
-            Topic::Close => "session/close",
-            Topic::Heartbeat => "session/heartbeat",
+            Topic::Initialize => "v1/session/initialize",
+            Topic::Discover => "v1/session/discover",
+            Topic::Message => "v1/session/message",
+            Topic::Errors => "v1/errors",
+            Topic::Internal => "v1/internal",
+            Topic::Close => "v1/session/close",
+            Topic::Heartbeat => "v1/session/heartbeat",
         }
     }
 
@@ -67,4 +67,8 @@ impl Topic {
         t.push_str(fingerprint);
         t
     }
+}
+
+pub fn challenge_len() -> usize {
+    30
 }

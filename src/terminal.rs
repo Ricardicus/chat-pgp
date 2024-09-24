@@ -315,7 +315,7 @@ impl App {
         }
         self.reset_cursor().await;
         self.set_input_mode(InputMode::Normal).await;
-        self.tx.send(Some(input)).await;
+        let _ = self.tx.send(Some(input)).await;
     }
 
     async fn get_input_mode(&self) -> InputMode {

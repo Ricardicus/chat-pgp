@@ -72,7 +72,7 @@ where
 {
     pub sessions: Arc<Mutex<HashMap<String, SessionData<SessionCrypto>>>>,
     pub discovered: Arc<Mutex<HashMap<String, String>>>,
-    pub requests_outgoing_initialization: Arc<Mutex<Vec<String>>>,
+    pub requests_outgoing_initialization: Arc<Mutex<Vec<(String, String)>>>,
     pub requests_incoming_initialization:
         Arc<Mutex<Vec<(SessionData<SessionCrypto>, Message, String)>>>,
     pub host_encro: Arc<Mutex<HostCrypto>>,
@@ -534,10 +534,8 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
         };
 
         let pub_key = self.host_encro.lock().await.get_public_key_as_base64();
-        let message = Message {
-            message: MessageData::Init(InitMsg { pub_key, signature }),
-            session_id: "".to_string(),
-        };
+        let mut challenge = String::new();
+        let message = Message::new_init(pub_key, signature, &mut challenge);
         let mut topic = Topic::Initialize.as_str().to_string();
         topic.push_str("/");
         topic.push_str(&cert.fingerprint().to_string());
@@ -550,7 +548,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
 
         {
             let mut requests = self.requests_outgoing_initialization.lock().await;
-            requests.push(other_key_fingerprint.clone());
+            requests.push((other_key_fingerprint.clone(), challenge));
         }
 
         let _ = handler.send_message(&topic, message).await;
@@ -1246,6 +1244,15 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                 }
 
                 let signature = msg.signature.clone();
+                let challenge = msg.challenge.clone();
+
+                if challenge.len() != challenge_len() {
+                    return Err(SessionErrorMsg {
+                        code: SessionErrorCodes::Protocol as u32,
+                        message: "Invalid challenge length".to_owned(),
+                    });
+                }
+
                 let pub_key = msg.pub_key.clone();
                 let pub_key_decoded = match base64::decode(msg.pub_key) {
                     Err(_) => {
@@ -1297,6 +1304,19 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                                 let s = pk_1.clone() + &pk_2;
                                 let key = sha256sum(&s);
                                 let pub_key = pub_encro.get_public_key_as_base64();
+
+                                let challenge_sig =
+                                    match self.host_encro.lock().await.sign(&challenge) {
+                                        Ok(s) => s,
+                                        Err(e) => {
+                                            return Err(SessionErrorMsg {
+                                                code: SessionErrorCodes::Encryption as u32,
+                                                message: "Failed to create signature of challenge"
+                                                    .to_owned(),
+                                            });
+                                        }
+                                    };
+
                                 let session_data = SessionData {
                                     id: key.clone(),
                                     last_active: SystemTime::now(),
@@ -1309,6 +1329,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                                     sym_cipher_key_encrypted.clone(),
                                     this_pub_key.clone(),
                                     pub_encro.get_public_key_as_base64(),
+                                    challenge_sig,
                                 );
                                 msg.session_id = key.clone();
 
@@ -1355,7 +1376,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
             }
             InitOk(msg) => {
                 let session_id = session_id.clone();
-
+                let challenge_sig = msg.challenge_sig.clone();
                 let sym_key_encrypted = msg.sym_key_encrypted.clone();
                 let sym_key = match self.host_encro.lock().await.decrypt(&sym_key_encrypted) {
                     Ok(res) => res,
@@ -1385,11 +1406,22 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                     let cert = cert.unwrap();
                     let other_key_fingerprint = cert.fingerprint().to_string();
 
-                    for pending in pendings.iter() {
-                        let pending_pub_key_fingerprint = pending.clone();
+                    for (pending_fingerprint, pending_challenge) in pendings.iter() {
+                        let pending_pub_key_fingerprint = pending_fingerprint.clone();
                         if other_key_fingerprint == pending_pub_key_fingerprint {
                             // Add this to the sessions to add
-                            add_session = Some(msg.pub_key.clone())
+                            let verified = match PGPEnCryptOwned::new_from_vec(&pub_key_dec) {
+                                Ok(pub_encro) => {
+                                    match pub_encro.verify(&challenge_sig, pending_challenge) {
+                                        Ok(result) => result,
+                                        Err(_) => false,
+                                    }
+                                }
+                                _ => false,
+                            };
+                            if verified {
+                                add_session = Some(msg.pub_key.clone())
+                            }
                         }
                     }
                 }

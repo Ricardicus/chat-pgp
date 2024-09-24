@@ -1,3 +1,5 @@
+use rand::distributions::Alphanumeric;
+use rand::{thread_rng, Rng};
 use std::process::Command;
 
 extern crate base64;
@@ -43,4 +45,12 @@ pub fn execute_command(command: &str) -> Result<String, String> {
 pub fn get_current_datetime() -> String {
     let now: DateTime<Utc> = Utc::now();
     now.format("%Y-%m-%d %H:%M:%S").to_string()
+}
+
+pub fn generate_random_string(length: usize) -> String {
+    let mut rng = thread_rng();
+    let random_string: String = (0..length)
+        .map(|_| rng.sample(Alphanumeric) as char)
+        .collect();
+    random_string
 }

@@ -27,7 +27,7 @@ pub trait CrypticalSign {
     fn sign(&self, input: &str) -> Result<String, String>;
 }
 pub trait CrypticalVerify {
-    fn verify(&self, input: &str, signature: &str) -> Result<bool, String>;
+    fn verify(&self, signature: &str, value: &str) -> Result<bool, String>;
 }
 
 pub trait CrypticalID {
