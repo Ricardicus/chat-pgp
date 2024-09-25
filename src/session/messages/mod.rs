@@ -1,6 +1,7 @@
 use crate::session::protocol::challenge_len;
 use crate::util::generate_random_string;
 use serde::{Deserialize, Serialize};
+use serde_cbor;
 use tokio::sync::mpsc;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -292,27 +293,24 @@ impl SessionMessage {
         }
     }
 
-    pub fn serialize(&self) -> Result<String, serde_json::Error> {
+    pub fn serialize(&self) -> Result<String, serde_cbor::Error> {
         // Convert the message to a JSON string
-        let json = serde_json::to_string(self)?;
+        let serialized = serde_cbor::to_vec(self)?;
 
         // Encode the JSON string as base64
-        let encoded = base64::encode(json);
+        let encoded = base64::encode(serialized);
 
         Ok(encoded)
     }
 
     pub fn deserialize(encoded_message: &str) -> Result<Self, ()> {
-        let bytes = base64::decode(encoded_message);
-        if bytes.is_err() {
-            return Err(());
-        }
-        let bytes = bytes.unwrap();
-        let message = serde_json::from_slice(&bytes);
-        if message.is_err() {
-            return Err(());
-        }
-        Ok(message.unwrap())
+        // Decode the base64 string into bytes
+        let bytes = base64::decode(encoded_message).map_err(|_| ())?;
+
+        // Deserialize the CBOR bytes into the struct
+        let message = serde_cbor::from_slice(&bytes).map_err(|_| ())?;
+
+        Ok(message)
     }
 
     pub fn to_string(&self) -> String {

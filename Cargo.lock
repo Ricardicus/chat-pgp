@@ -2347,7 +2347,7 @@ dependencies = [
  "ratatui",
  "sequoia-openpgp",
  "serde",
- "serde_json",
+ "serde_cbor",
  "sha2",
  "tokio",
  "zenoh",

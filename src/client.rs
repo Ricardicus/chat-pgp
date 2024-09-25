@@ -395,11 +395,25 @@ async fn launch_terminal_program(
     cert: Arc<Cert>,
     session_tx: mpsc::Sender<(String, String)>,
     mut session: Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt>,
-) {
+) -> Result<(), ()> {
     let pipe;
     unsafe {
         pipe = PIPE.get().unwrap().clone();
     }
+    let zc = session.middleware_config.clone();
+    let zenoh_config = Config::from_file(zc.clone()).unwrap();
+    let zenoh_session;
+    {
+        let zenoh_connection = zenoh::open(zenoh_config).res().await;
+        if zenoh_connection.is_err() {
+            terminate(session.get_tx().await).await;
+            return Err(());
+        }
+        let zenoh_connection = zenoh_connection.unwrap();
+        zenoh_session = Arc::new(Mutex::new(zenoh_connection));
+    }
+    let zenoh_handler = ZenohHandler::new(zenoh_session);
+
     let (tx, mut rx) = mpsc::channel::<Option<String>>(100);
     // Setup window manager serving
     tokio::spawn(async move {
@@ -415,11 +429,6 @@ async fn launch_terminal_program(
     // Initialize
     pipe.send(WindowCommand::Init()).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
-
-    let zc = session.middleware_config.clone();
-    let zenoh_config = Config::from_file(zc).unwrap();
-    let zenoh_session = Arc::new(Mutex::new(zenoh::open(zenoh_config).res().await.unwrap()));
-    let zenoh_handler = ZenohHandler::new(zenoh_session);
 
     let pgp_handler = PGPEnDeCrypt::new_no_certpass(cert.clone());
 
@@ -669,6 +678,7 @@ async fn launch_terminal_program(
             }
         }
     }
+    Ok(())
 }
 
 async fn initialize_global_value() {
