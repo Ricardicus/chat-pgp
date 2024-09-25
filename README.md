@@ -73,7 +73,7 @@ Want to add:
 - Group chat (not sure how to implement)
 - Message retrieval after offline (not sure how to implement, possibly write my own router - a lot of considerations)
 
-The platform now only works strictly online, with both peers connected at the same time.
+Today the platform only works strictly online, with both peers connected at the same time.
 
 ## Contribute
 
