@@ -205,7 +205,10 @@ async fn cb_chat(public_key: String, message: String) {
     };
     match PGPEnCryptOwned::new_from_vec(&pub_key_decoded) {
         Ok(pub_encro) => {
-            let (chat_id, chat_view) = format_chat_msg(&message, &pub_encro);
+            let (mut chat_id, chat_view) = format_chat_msg(&message, &pub_encro);
+            let fingerprint = short_fingerprint(&pub_encro.get_public_key_fingerprint());
+            chat_id.push_str(" ");
+            chat_id.push_str(&fingerprint);
             println_chat_message(chat_id, chat_view).await;
         }
         _ => {}
@@ -636,9 +639,14 @@ async fn launch_terminal_program(
                                             let fingerprint = session.get_fingerprint().await;
                                             let userid = session.get_userid().await;
 
-                                            let (chat_id, chat_view) =
+                                            let (_, chat_view) =
                                                 format_chat_msg_fmt(&input, &userid, &fingerprint);
-
+                                            let mut chat_id = pub_encro.get_userid();
+                                            let fingerprint = short_fingerprint(
+                                                &pub_encro.get_public_key_fingerprint(),
+                                            );
+                                            chat_id.push_str(" ");
+                                            chat_id.push_str(&fingerprint);
                                             println_chat_message(chat_id, chat_view).await;
                                         }
                                         _ => {}
