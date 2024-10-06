@@ -1,8 +1,5 @@
-use ncurses::*;
-use std::collections::HashMap;
-
 use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex, OnceCell, Semaphore};
+use tokio::sync::{mpsc, Mutex, OnceCell};
 use tokio::time::{timeout, Duration};
 
 use crate::session::crypto::{Cryptical, CrypticalID};
@@ -15,7 +12,7 @@ use ratatui::{
     prelude::Margin,
     style::{Color, Modifier, Style, Stylize},
     text::{Line, Span, Text},
-    widgets::{Block, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
+    widgets::{Block, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
     DefaultTerminal, Frame,
 };
 
@@ -257,7 +254,7 @@ impl App {
 
     async fn byte_index(&self) -> usize {
         let state = self.state.lock().await;
-        let mut s = &state.input;
+        let s = &state.input;
         let len = s.len();
         let char_index;
         {
@@ -413,7 +410,7 @@ impl App {
             .scrollstate_chat
             .content_length(state.chat_messages.len());
     }
-    async fn set_last_message(&mut self, window: usize, message: String, style: TextStyle) {
+    async fn set_last_message(&mut self, _window: usize, message: String, style: TextStyle) {
         let mut state = self.state.lock().await;
         if state.messages.len() > 0 {
             if let Some(last) = state.messages.last_mut() {
@@ -763,7 +760,7 @@ async fn initialize_global_values() {
     let _ = STATE.set(Arc::new(WindowPipe::<AppState>::new()));
 }
 
-pub async fn read_app_state() -> Result<AppState, ()> {
+async fn read_app_state() -> Result<AppState, ()> {
     match STATE.get().unwrap().read().await {
         Ok(cmd) => Ok(cmd),
         Err(_) => Err(()),

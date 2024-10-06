@@ -104,12 +104,6 @@ async fn read_message(
     Ok("".to_string())
 }
 
-async fn send_chat_message(window: usize, message: Option<String>) {
-    unsafe {
-        //PIPE.get().unwrap().tx_chat_input(message).await;
-    }
-}
-
 async fn println_message_str(window: usize, message: &str) {
     println_message(window, message.to_string()).await;
 }
@@ -365,10 +359,7 @@ async fn cb_init_incoming(public_key: String) -> bool {
 }
 
 async fn terminate(session_tx: mpsc::Sender<(String, String)>) {
-    let pipe;
-    unsafe {
-        pipe = PIPE.get().unwrap().clone();
-    }
+    let pipe = PIPE.get().unwrap().clone();
     let topic = Topic::Internal.as_str();
     let msg = SessionMessage::new_internal(
         "internal".to_owned(),
@@ -376,7 +367,6 @@ async fn terminate(session_tx: mpsc::Sender<(String, String)>) {
         topic.to_string(),
     );
     pipe.send(WindowCommand::Shutdown()).await;
-    send_chat_message(1, None).await;
 
     tokio::time::sleep(Duration::from_millis(200)).await;
     let _ = session_tx
@@ -396,10 +386,7 @@ async fn launch_terminal_program(
     session_tx: mpsc::Sender<(String, String)>,
     mut session: Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt>,
 ) -> Result<(), ()> {
-    let pipe;
-    unsafe {
-        pipe = PIPE.get().unwrap().clone();
-    }
+    let pipe = PIPE.get().unwrap().clone();
     let zc = session.middleware_config.clone();
     let zenoh_config = Config::from_file(zc.clone()).unwrap();
     let zenoh_session;
@@ -422,15 +409,10 @@ async fn launch_terminal_program(
         let pipe_clone = pipe.clone();
         window_manager.serve(pipe_clone, tx).await;
     });
-    let pipe;
-    unsafe {
-        pipe = PIPE.get().unwrap().clone();
-    }
+    let pipe = PIPE.get().unwrap().clone();
     // Initialize
     pipe.send(WindowCommand::Init()).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
-
-    let pgp_handler = PGPEnDeCrypt::new_no_certpass(cert.clone());
 
     // Launch window manager program
     tokio::time::sleep(Duration::from_millis(400)).await;
@@ -444,7 +426,6 @@ async fn launch_terminal_program(
     // Serve incoming commands
     InputCommand::print_small_help().await;
     let mut keep_running = true;
-    let mut print_prompt = true;
     while keep_running {
         let pending = session.get_pending_request().await;
         if pending.is_some() {
@@ -485,7 +466,6 @@ async fn launch_terminal_program(
                                 ),
                             )
                             .await;
-                            print_prompt = true;
                         } else {
                             println_message_str(1, "-- Declined this chat request.").await;
                             let _ = session.decline_pending_request(&session_id).await;
@@ -524,11 +504,6 @@ async fn launch_terminal_program(
                 let mut s = ">> ".to_string();
                 s.push_str(&input);
                 println_message(1, s).await;
-                if input.len() > 0 {
-                    print_prompt = true;
-                } else {
-                    print_prompt = false;
-                }
                 let cmd = InputCommand::parse_from(&input);
                 match cmd {
                     Some(InputCommand::List(_)) => {
@@ -859,5 +834,5 @@ async fn main() {
         };
     });
 
-    launch_terminal_program(cert.clone(), session.get_tx().await, session.clone()).await;
+    let _ = launch_terminal_program(cert.clone(), session.get_tx().await, session.clone()).await;
 }

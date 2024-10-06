@@ -27,7 +27,7 @@ use messages::MessageData::{
 use messages::MessagingError::*;
 use messages::SessionMessage as Message;
 use messages::{
-    ChatMsg, EncryptedMsg, InitMsg, MessageData, MessageListener, Messageble, MessagebleTopicAsync,
+    ChatMsg, EncryptedMsg, MessageData, MessageListener, MessagebleTopicAsync,
     MessagebleTopicAsyncPublishReads, MessagebleTopicAsyncReadTimeout, MessagingError,
     SessionErrorCodes, SessionErrorMsg,
 };
@@ -154,7 +154,7 @@ where
 
 impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
     pub fn new(host_encro: PGPEnDeCrypt, middleware_config: String) -> Self {
-        let (tx, mut rx) = mpsc::channel(100);
+        let (tx, rx) = mpsc::channel(100);
         let (tx_chat, rx_chat) = mpsc::channel(100);
         Session {
             sessions: Arc::new(Mutex::new(HashMap::new())),
@@ -258,7 +258,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
         let mut session_init_ok_msg_topic = None;
         {
             let mut requests = self.requests_incoming_initialization.lock().await;
-            let mut index = None;
+            let _index;
 
             for (i, (session_data, message, topic)) in requests.iter().enumerate() {
                 let id = session_data.id.clone();
@@ -266,7 +266,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                     session_init_ok_msg = Some(message.clone());
                     session_data_incoming = Some(session_data.clone());
                     session_init_ok_msg_topic = Some(topic.clone());
-                    index = Some(i);
+                    _index = Some(i);
                     requests.remove(i); // Remove the request while the lock is still active
                     break;
                 }
@@ -612,7 +612,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
     ) {
         let pub_key_fingerprint = self.host_encro.lock().await.get_public_key_fingerprint();
         let topic_in = Topic::messaging_topic_in(pub_key_fingerprint.as_ref());
-        let topic_out = Topic::messaging_topic_in(&other_key_fingerprint);
+        let _topic_out = Topic::messaging_topic_in(&other_key_fingerprint);
 
         let mut topics: Vec<String> = Vec::new();
         topics.push(topic_in);
@@ -981,7 +981,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
         discover_topic_reply.push_str(Topic::reply_suffix());
         let _timeout_discovery = Duration::from_secs(5);
 
-        let mut this_pub_key = None;
+        let this_pub_key;
         {
             this_pub_key = Some(self.host_encro.lock().await.get_public_key_as_base64());
         }
@@ -1160,7 +1160,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                     discovered = self.discovered.lock().await;
                 }
 
-                let mut this_fingerprint = None;
+                let this_fingerprint;
                 {
                     this_fingerprint =
                         Some(self.host_encro.lock().await.get_public_key_fingerprint());
@@ -1214,7 +1214,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                     discovered = self.discovered.lock().await;
                 }
 
-                let mut this_fingerprint = None;
+                let this_fingerprint;
                 {
                     this_fingerprint =
                         Some(self.host_encro.lock().await.get_public_key_fingerprint());
@@ -1308,7 +1308,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                                 let challenge_sig =
                                     match self.host_encro.lock().await.sign(&challenge) {
                                         Ok(s) => s,
-                                        Err(e) => {
+                                        Err(_e) => {
                                             return Err(SessionErrorMsg {
                                                 code: SessionErrorCodes::Encryption as u32,
                                                 message: "Failed to create signature of challenge"
@@ -1494,7 +1494,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                 }
             }
             Encrypted(msg) => {
-                let mut dec_msg = None;
+                let dec_msg;
                 {
                     let sm = &self.sessions.lock().await;
                     let cipher = match sm.get(&message.session_id) {
