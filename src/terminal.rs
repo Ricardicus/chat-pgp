@@ -55,6 +55,10 @@ pub struct NewWindowCommand {
     pub win_height: i32,
     pub win_width: i32,
 }
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct SetChatMessagesCommand {
+    pub chat_messages: Vec<String>,
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum WindowCommand {
@@ -64,6 +68,7 @@ pub enum WindowCommand {
     Read(ReadCommand),
     New(NewWindowCommand),
     ChatClosed(ChatClosedCommand),
+    SetChatMessages(SetChatMessagesCommand),
     Init(),
     Shutdown(),
 }
@@ -402,7 +407,14 @@ impl App {
             .scrollstate_commands
             .content_length(state.messages.len());
     }
-    async fn write_chat_new_message(&mut self, chatid: String, message: String) {
+    async fn set_chat_messages(&mut self, messages: Vec<String>) {
+        let mut state = self.state.lock().await;
+        state.chat_messages = messages;
+        state.scrollstate_chat = state
+            .scrollstate_chat
+            .content_length(state.chat_messages.len());
+    }
+    async fn write_new_chat_message(&mut self, chatid: String, message: String) {
         let mut state = self.state.lock().await;
         state.chatid = chatid;
         state.chat_messages.push(message);
@@ -456,7 +468,10 @@ impl App {
                             app.clear_chat().await;
                         }
                         WindowCommand::PrintChat(cmd) => {
-                            app.write_chat_new_message(cmd.chatid, cmd.message).await;
+                            app.write_new_chat_message(cmd.chatid, cmd.message).await;
+                        }
+                        WindowCommand::SetChatMessages(cmd) => {
+                            app.set_chat_messages(cmd.chat_messages).await;
                         }
                         _ => {}
                     },

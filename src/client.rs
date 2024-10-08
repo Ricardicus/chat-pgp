@@ -36,7 +36,7 @@ use ncurses::*;
 mod terminal;
 use terminal::{
     format_chat_msg, format_chat_msg_fmt, short_fingerprint, ChatClosedCommand, PrintChatCommand,
-    PrintCommand, WindowCommand, WindowManager, WindowPipe,
+    PrintCommand, SetChatMessagesCommand, WindowCommand, WindowManager, WindowPipe,
 };
 
 #[derive(Parser)]
@@ -46,10 +46,6 @@ struct Cli {
     #[clap(short, long)]
     #[arg(default_value = "new")]
     gpgkey: String,
-
-    #[clap(long)]
-    #[arg(default_value_t = ("127.0.0.1:5555").to_string())]
-    server: String,
 
     #[clap(long)]
     #[arg(default_value = "false")]
@@ -79,7 +75,14 @@ async fn println_chat_closed_message(message: String) {
         .send(WindowCommand::ChatClosed(ChatClosedCommand { message }))
         .await;
 }
-
+async fn chat_reset_messages() {
+    PIPE.get()
+        .unwrap()
+        .send(WindowCommand::SetChatMessages(SetChatMessagesCommand {
+            chat_messages: Vec::new(),
+        }))
+        .await;
+}
 async fn println_chat_message(chatid: String, message: String) {
     PIPE.get()
         .unwrap()
@@ -94,14 +97,6 @@ async fn print_message(window: usize, message: String) {
         .unwrap()
         .send(WindowCommand::Print(PrintCommand { window, message }))
         .await;
-}
-async fn read_message(
-    window: usize,
-    prompt: &str,
-    upper_prompt: &str,
-    timeout: i32,
-) -> Result<String, ()> {
-    Ok("".to_string())
 }
 
 async fn println_message_str(window: usize, message: &str) {
@@ -273,6 +268,12 @@ async fn cb_closed(public_key: String, _session_id: String) {
                 date_and_time, userid, fingerprint_short
             ))
             .await;
+
+            // Spawn a new process
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                chat_reset_messages().await;
+            });
         }
         _ => {}
     }
@@ -673,8 +674,6 @@ async fn initialize_global_value() {
 async fn main() {
     let cli = Cli::parse();
 
-    let mut server = "tcp://".to_string();
-    server.push_str(&cli.server);
     let gpgkey = cli.gpgkey;
     let test_sender = cli.test_sender;
     let test_receiver = cli.test_receiver;
@@ -708,7 +707,7 @@ async fn main() {
     let cert = Arc::new(cert.unwrap());
 
     let pgp_handler = PGPEnDeCrypt::new(cert.clone(), &passphrase);
-    let mut session = Session::new(pgp_handler, zenoh_config.clone());
+    let mut session = Session::new(pgp_handler, zenoh_config.clone(), false);
 
     if test_receiver {
         session.set_discovery_interval_seconds(1);
@@ -816,10 +815,6 @@ async fn main() {
             terminate(tx_clone).await;
         }
     });
-
-    //tokio::spawn(async move {
-
-    //});
 
     let mut session_clone = session.clone();
     tokio::spawn(async move {

@@ -9,6 +9,10 @@ edition = "2021"
 name="client"
 path="./src/client.rs"
 
+[[bin]]
+name="memory"
+path="./src/relay.rs"
+
 [dependencies]
 anyhow = "1.0.79"
 base64 = "0.20.0"
@@ -33,3 +37,4 @@ ratatui = "0.28.1"
 color-eyre = "0.6.3"
 rand = "0.8.5"
 serde_cbor = "0.11.2"
+ringbuffer = "0.15.0"

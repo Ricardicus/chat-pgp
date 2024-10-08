@@ -2345,6 +2345,7 @@ dependencies = [
  "once_cell",
  "rand",
  "ratatui",
+ "ringbuffer",
  "sequoia-openpgp",
  "serde",
  "serde_cbor",
@@ -2769,6 +2770,12 @@ dependencies = [
  "untrusted",
  "windows-sys 0.52.0",
 ]
+
+[[package]]
+name = "ringbuffer"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3df6368f71f205ff9c33c076d170dd56ebf68e8161c733c0caa07a7a5509ed53"
 
 [[package]]
 name = "ringbuffer-spsc"

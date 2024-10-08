@@ -51,6 +51,16 @@ pub struct ChatMsg {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ReplayMsg {
+    pub session_id: String,
+}
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ReplayResponseMsg {
+    pub session_id: String,
+    pub messages: Vec<SessionMessage>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct CloseOkMsg {
     pub data: String,
 }
@@ -123,6 +133,8 @@ pub enum MessageData {
     DiscoveryReply(DiscoveryReplyMsg),
     Internal(InternalMsg),
     Heartbeat(HeartbeatMsg),
+    Replay(ReplayMsg),
+    ReplayResponse(ReplayResponseMsg),
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -282,6 +294,25 @@ impl SessionMessage {
     pub fn new_heartbeat(session_id: String) -> Self {
         SessionMessage {
             message: MessageData::Heartbeat(HeartbeatMsg {}),
+            session_id: session_id.clone(),
+        }
+    }
+
+    pub fn new_replay(session_id: String) -> Self {
+        SessionMessage {
+            message: MessageData::Replay(ReplayMsg {
+                session_id: session_id.clone(),
+            }),
+            session_id: session_id.clone(),
+        }
+    }
+
+    pub fn new_replay_response(session_id: String, messages: Vec<SessionMessage>) -> Self {
+        SessionMessage {
+            message: MessageData::ReplayResponse(ReplayResponseMsg {
+                session_id: session_id.clone(),
+                messages,
+            }),
             session_id: session_id.clone(),
         }
     }
