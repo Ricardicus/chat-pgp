@@ -10,7 +10,7 @@ name="client"
 path="./src/client.rs"
 
 [[bin]]
-name="memory"
+name="relay"
 path="./src/relay.rs"
 
 [dependencies]

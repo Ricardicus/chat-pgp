@@ -3,7 +3,7 @@ use tokio::sync::{mpsc, Mutex, OnceCell};
 use tokio::time::{timeout, Duration};
 
 use crate::session::crypto::{Cryptical, CrypticalID};
-use crate::util::get_current_datetime;
+use crate::util::{get_current_datetime, short_fingerprint};
 
 use color_eyre::Result;
 use ratatui::{
@@ -118,7 +118,7 @@ impl WindowManager {
 
     pub async fn cleanup(&mut self) {}
 
-    pub async fn init(&mut self, tx: mpsc::Sender<Option<String>>) {
+    pub async fn init(&mut self, tx: mpsc::Sender<Option<WindowCommand>>) {
         if self.ratatui_thread.is_none() {
             let pipe = self.pipe.clone();
             self.ratatui_thread = Some(tokio::spawn(async move {
@@ -136,7 +136,7 @@ impl WindowManager {
     pub async fn serve(
         &mut self,
         pipe: WindowPipe<WindowCommand>,
-        tx_terminal: mpsc::Sender<Option<String>>,
+        tx_terminal: mpsc::Sender<Option<WindowCommand>>,
     ) {
         let mut keep_running;
         {
@@ -192,7 +192,7 @@ struct AppState {
 struct App {
     state: Arc<Mutex<AppState>>,
     should_run: Arc<Mutex<bool>>,
-    tx: mpsc::Sender<Option<String>>,
+    tx: mpsc::Sender<Option<WindowCommand>>,
 }
 
 #[derive(Clone, Copy)]
@@ -202,7 +202,7 @@ enum InputMode {
 }
 
 impl App {
-    async fn new(tx: mpsc::Sender<Option<String>>) -> Self {
+    async fn new(tx: mpsc::Sender<Option<WindowCommand>>) -> Self {
         Self {
             state: Arc::new(Mutex::new(AppState {
                 input: String::new(),
@@ -234,6 +234,10 @@ impl App {
     async fn clear_chat(&mut self) {
         let mut state = self.state.lock().await;
         state.chat_messages.clear();
+    }
+
+    async fn is_in_chat_mode(&self) -> bool {
+        self.state.lock().await.chat_messages.len() > 0
     }
 
     async fn move_cursor_left(&mut self, len: usize) {
@@ -321,7 +325,13 @@ impl App {
         }
         self.reset_cursor().await;
         self.set_input_mode(InputMode::Normal).await;
-        let _ = self.tx.send(Some(input)).await;
+        let _ = self
+            .tx
+            .send(Some(WindowCommand::Println(PrintCommand {
+                window: 1,
+                message: input,
+            })))
+            .await;
     }
 
     async fn get_input_mode(&self) -> InputMode {
@@ -538,8 +548,23 @@ impl App {
                                 app.set_input_mode(InputMode::Editing).await;
                             }
                             KeyCode::Char('q') => {
-                                app.set_terminate().await;
-                                let _ = tx.send(None).await;
+                                if !app.is_in_chat_mode().await {
+                                    app.set_terminate().await;
+                                    app.clear_chat().await;
+                                    let _ = tx.send(None).await;
+                                } else {
+                                    app.write_new_message(
+                                        "Closed the session".to_string(),
+                                        TextStyle::Bold,
+                                    )
+                                    .await;
+                                    app.clear_chat().await;
+                                    let _ = tx
+                                        .send(Some(WindowCommand::ChatClosed(ChatClosedCommand {
+                                            message: "Closing the chat".to_string(),
+                                        })))
+                                        .await;
+                                }
                             }
                             KeyCode::Up => app.move_vertical_scroll_up().await,
                             KeyCode::Down => app.move_vertical_scroll_down().await,
@@ -563,9 +588,6 @@ impl App {
                         }
                         InputMode::Editing => {}
                     }
-                }
-                {
-                    //send_app_state(app.get_state().await).await;
                 }
                 {
                     should_run = app.should_run().await;
@@ -784,16 +806,6 @@ async fn read_app_state() -> Result<AppState, ()> {
 
 async fn send_app_state(state: AppState) {
     let _ = STATE.get().unwrap().send(state).await;
-}
-
-pub fn short_fingerprint(fingerprint: &str) -> String {
-    if fingerprint.len() > 8 {
-        let first_four = &fingerprint[0..4];
-        let last_four = &fingerprint[fingerprint.len() - 4..];
-        format!("{}...{}", first_four, last_four)
-    } else {
-        fingerprint.to_string()
-    }
 }
 
 pub fn format_chat_msg<P: CrypticalID + Cryptical>(message: &str, encro: &P) -> (String, String) {

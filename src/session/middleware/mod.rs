@@ -7,9 +7,8 @@ use crate::session::Session;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Mutex};
-use zenoh::prelude::*;
-
 use tokio::time::timeout;
+use zenoh::prelude::*;
 
 pub struct ZMQHandler {
     context: zmq::Context,

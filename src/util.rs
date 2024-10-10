@@ -42,6 +42,16 @@ pub fn execute_command(command: &str) -> Result<String, String> {
     }
 }
 
+pub fn short_fingerprint(fingerprint: &str) -> String {
+    if fingerprint.len() > 8 {
+        let first_four = &fingerprint[0..4];
+        let last_four = &fingerprint[fingerprint.len() - 4..];
+        format!("{}...{}", first_four, last_four)
+    } else {
+        fingerprint.to_string()
+    }
+}
+
 pub fn get_current_datetime() -> String {
     let now: DateTime<Utc> = Utc::now();
     now.format("%Y-%m-%d %H:%M:%S").to_string()

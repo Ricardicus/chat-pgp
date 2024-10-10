@@ -22,7 +22,7 @@ use zenoh::prelude::r#async::*;
 use zenoh::Config;
 
 mod util;
-use util::get_current_datetime;
+use util::{get_current_datetime, short_fingerprint};
 
 mod pgp;
 use pgp::pgp::{generate_new_key, read_from_gpg, read_from_vec};
@@ -35,8 +35,8 @@ use ncurses::*;
 
 mod terminal;
 use terminal::{
-    format_chat_msg, format_chat_msg_fmt, short_fingerprint, ChatClosedCommand, PrintChatCommand,
-    PrintCommand, SetChatMessagesCommand, WindowCommand, WindowManager, WindowPipe,
+    format_chat_msg, format_chat_msg_fmt, ChatClosedCommand, PrintChatCommand, PrintCommand,
+    SetChatMessagesCommand, WindowCommand, WindowManager, WindowPipe,
 };
 
 #[derive(Parser)]
@@ -111,6 +111,8 @@ struct ListCommand {}
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct HelpCommand {}
 #[derive(Serialize, Deserialize, Clone, Debug)]
+struct RemindCommand {}
+#[derive(Serialize, Deserialize, Clone, Debug)]
 struct InitializeCommand {
     pub entry: usize,
 }
@@ -123,6 +125,7 @@ enum InputCommand {
     Initialize(InitializeCommand),
     Exit(ExitCommand),
     Help(HelpCommand),
+    Remind(RemindCommand),
 }
 
 impl InputCommand {
@@ -130,11 +133,11 @@ impl InputCommand {
         let binding = input.to_lowercase();
         let mut parts = binding.split_whitespace();
         match parts.next() {
-            Some("!list") => {
+            Some("list") => {
                 let cmd = ListCommand {};
                 Some(InputCommand::List(cmd))
             }
-            Some("!init") => {
+            Some("init") => {
                 let entry = match parts.next() {
                     Some(entry) => entry.parse::<usize>().unwrap(),
                     None => 0,
@@ -142,13 +145,17 @@ impl InputCommand {
                 let cmd = InitializeCommand { entry };
                 Some(InputCommand::Initialize(cmd))
             }
-            Some("!exit") => {
+            Some("exit") => {
                 let cmd = ExitCommand {};
                 Some(InputCommand::Exit(cmd))
             }
-            Some("!help") => {
+            Some("help") => {
                 let cmd = HelpCommand {};
                 Some(InputCommand::Help(cmd))
+            }
+            Some("remind") => {
+                let cmd = RemindCommand {};
+                Some(InputCommand::Remind(cmd))
             }
             _ => None,
         }
@@ -157,24 +164,26 @@ impl InputCommand {
     async fn print_help() {
         let _help_text = String::new();
         println_message_str(1, "Available commands:").await;
-        println_message_str(1, "!list").await;
-        println_message_str(1, "- List and enumerate all discovered peers.").await;
-        println_message_str(1, "!init [entry]").await;
-        println_message_str(1, "- Initialize a chat session with a peer").await;
-        println_message_str(1, "  enumerated as per !list.").await;
-        println_message_str(1, "!exit").await;
-        println_message_str(1, "- Exit the program.").await;
+        println_message_str(1, "  list").await;
+        println_message_str(1, "  - List and enumerate all discovered peers.").await;
+        println_message_str(1, "  remind").await;
+        println_message_str(1, "  - List and enumerate encrypted and stored sessions.").await;
+        println_message_str(1, "  init [entry]").await;
+        println_message_str(1, "  - Initialize a chat session with a peer").await;
+        println_message_str(1, "    enumerated as per !list.").await;
+        println_message_str(1, "  exit").await;
+        println_message_str(1, "  - Exit the program.").await;
     }
     async fn print_small_help() {
         println_message(1, InputCommand::get_small_help()).await;
     }
     fn get_small_help() -> String {
-        "Welcome to Chat-PGP. Type !help for help.".to_string()
+        "Welcome to Chat-PGP. Type help for help.".to_string()
     }
     async fn read_yes_or_no(
         window: usize,
         prompt: &str,
-        rx: &mut mpsc::Receiver<Option<String>>,
+        rx: &mut mpsc::Receiver<Option<WindowCommand>>,
     ) -> Result<bool, ()> {
         println_message_str(1, prompt).await;
         let input = rx.recv().await;
@@ -182,6 +191,10 @@ impl InputCommand {
             let input = input.unwrap();
             if input.is_some() {
                 let input = input.unwrap();
+                let input = match input {
+                    WindowCommand::Println(input) => input.message,
+                    _ => "".into(),
+                };
                 if input.to_lowercase().starts_with('y') {
                     return Ok(true);
                 }
@@ -403,9 +416,9 @@ async fn launch_terminal_program(
         let zenoh_connection = zenoh_connection.unwrap();
         zenoh_session = Arc::new(Mutex::new(zenoh_connection));
     }
-    let zenoh_handler = ZenohHandler::new(zenoh_session);
+    let zenoh_handler = ZenohHandler::new(zenoh_session.clone());
 
-    let (tx, mut rx) = mpsc::channel::<Option<String>>(100);
+    let (tx, mut rx) = mpsc::channel::<Option<WindowCommand>>(100);
     // Setup window manager serving
     tokio::spawn(async move {
         let mut window_manager = WindowManager::new();
@@ -505,9 +518,29 @@ async fn launch_terminal_program(
                     continue;
                 }
                 let input = input.unwrap();
+                match input {
+                    WindowCommand::ChatClosed(_) => {
+                        let session_ids = session.get_session_ids().await;
+                        let zenoh_handler =
+                            Arc::new(Mutex::new(ZenohHandler::new(zenoh_session.clone())));
+                        for session_id in session_ids {
+                            session
+                                .terminate_session(&session_id, zenoh_handler.clone())
+                                .await;
+                        }
+                    }
+                    _ => {}
+                };
+
                 let mut s = ">> ".to_string();
-                s.push_str(&input);
-                println_message(1, s).await;
+                let input = match input {
+                    WindowCommand::Println(input) => input.message,
+                    _ => "".into(),
+                };
+                if session.get_number_of_sessions().await == 0 {
+                    s.push_str(&input);
+                    println_message(1, s).await;
+                }
                 let cmd = InputCommand::parse_from(&input);
                 match cmd {
                     Some(InputCommand::List(_)) => {
@@ -517,7 +550,7 @@ async fn launch_terminal_program(
                         if discovered.len() == 0 {
                             println_message_str(
                                 1,
-                                "-- Did not discover any other peers out there ¯\\_(´_´)_/¯...",
+                                "-- Did not discover any other peers out there ¯\\_(ツ)_/¯...",
                             )
                             .await;
                         } else {
@@ -609,6 +642,65 @@ async fn launch_terminal_program(
                         // Print help
                         InputCommand::print_help().await;
                     }
+                    Some(InputCommand::Remind(_)) => {
+                        let ids = session.get_reminded_session_ids().await;
+                        if ids.len() == 0 {
+                            println_message_str(
+                                1,
+                                "There is no memory of any previous sessions ¯\\_(ツ)_/¯... ",
+                            )
+                            .await;
+                        } else {
+                            for (i, id) in ids.iter().enumerate() {
+                                let len =
+                                    session.get_reminded_length(id).await.unwrap_or_else(|_| 0);
+                                let mut peers = "".to_string();
+                                let last_active = session
+                                    .get_reminded_last_active(id)
+                                    .await
+                                    .unwrap_or_else(|_| "".to_string());
+                                let others = session
+                                    .get_reminded_others(id)
+                                    .await
+                                    .unwrap_or_else(|_| Vec::new());
+                                for other in others.iter() {
+                                    if peers.len() > 0 {
+                                        peers.push_str(", ");
+                                    }
+                                    let pub_key_decoded = match base64::decode(other) {
+                                        Err(_) => Err(()),
+                                        Ok(pub_key) => Ok(pub_key),
+                                    };
+                                    if pub_key_decoded.is_ok() {
+                                        let pub_key_decoded = pub_key_decoded.unwrap();
+                                        match PGPEnCryptOwned::new_from_vec(&pub_key_decoded) {
+                                            Ok(pub_encro) => {
+                                                peers.push_str(&format!(
+                                                    "{} ({})",
+                                                    pub_encro.get_userid(),
+                                                    short_fingerprint(
+                                                        &pub_encro.get_public_key_fingerprint()
+                                                    )
+                                                ));
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                }
+                                println_message_str(
+                                    1,
+                                    &format!(
+                                        "{}: {}, (last active: {}, messages: {})",
+                                        i + 1,
+                                        peers,
+                                        last_active,
+                                        len
+                                    ),
+                                )
+                                .await;
+                            }
+                        }
+                    }
                     None => {
                         // Send this input to listeners
                         if input.len() > 0 && session.get_number_of_sessions().await > 0 {
@@ -654,6 +746,8 @@ async fn launch_terminal_program(
                                     }
                                 }
                             }
+                        } else {
+                            InputCommand::print_help().await;
                         }
                     }
                 }
