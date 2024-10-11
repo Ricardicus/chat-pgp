@@ -35,7 +35,7 @@ async fn main() {
     let pgp_handler = PGPEnDeCrypt::new(cert.clone(), &passphrase);
 
     // launching a relay session
-    let mut session = Session::new(pgp_handler, zenoh_config.clone(), true);
+    let mut session = Session::new(pgp_handler, zenoh_config.clone(), true, false);
 
     let _ = match session.serve().await {
         Ok(_) => {}

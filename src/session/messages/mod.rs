@@ -1,5 +1,5 @@
 use crate::session::protocol::challenge_len;
-use crate::util::generate_random_string;
+use crate::util::{generate_random_string, get_current_datetime};
 use serde::{Deserialize, Serialize};
 use serde_cbor;
 use tokio::sync::mpsc;
@@ -15,7 +15,6 @@ pub struct InitMsg {
     pub signature: String,
     pub challenge: String,
 }
-
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct InitOkMsg {
     pub sym_key_encrypted: String,
@@ -48,6 +47,9 @@ pub struct CloseMsg {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ChatMsg {
     pub message: String,
+    pub sender_userid: String,
+    pub sender_fingerprint: String,
+    pub date_time: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -252,9 +254,14 @@ impl SessionMessage {
             session_id: "".to_string(),
         }
     }
-    pub fn new_chat(message: String) -> Self {
+    pub fn new_chat(message: String, sender_userid: String, sender_fingerprint: String) -> Self {
         SessionMessage {
-            message: MessageData::Chat(ChatMsg { message: message }),
+            message: MessageData::Chat(ChatMsg {
+                message: message,
+                sender_userid,
+                sender_fingerprint,
+                date_time: get_current_datetime(),
+            }),
             session_id: "".to_string(),
         }
     }

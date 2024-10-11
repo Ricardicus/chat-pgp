@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 mod session;
 
+use crate::session::messages::MessageData::{Chat, Encrypted};
 use serde::{Deserialize, Serialize};
 use session::crypto::{
     ChaCha20Poly1305EnDeCrypt, Cryptical, CrypticalID, PGPEnCryptOwned, PGPEnDeCrypt,
@@ -54,6 +55,10 @@ struct Cli {
     #[clap(long)]
     #[arg(default_value = "false")]
     test_sender: bool,
+
+    #[clap(long)]
+    #[arg(default_value = "false")]
+    no_memory: bool,
 
     #[clap(short, long)]
     #[arg(default_value = "zenoh/config.json5")]
@@ -117,6 +122,10 @@ struct InitializeCommand {
     pub entry: usize,
 }
 #[derive(Serialize, Deserialize, Clone, Debug)]
+struct RewindCommand {
+    pub entry: usize,
+}
+#[derive(Serialize, Deserialize, Clone, Debug)]
 struct ExitCommand {}
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -126,6 +135,7 @@ enum InputCommand {
     Exit(ExitCommand),
     Help(HelpCommand),
     Remind(RemindCommand),
+    Rewind(RewindCommand),
 }
 
 impl InputCommand {
@@ -157,6 +167,14 @@ impl InputCommand {
                 let cmd = RemindCommand {};
                 Some(InputCommand::Remind(cmd))
             }
+            Some("rewind") => {
+                let entry = match parts.next() {
+                    Some(entry) => entry.parse::<usize>().unwrap(),
+                    None => 0,
+                };
+                let cmd = RewindCommand { entry };
+                Some(InputCommand::Rewind(cmd))
+            }
             _ => None,
         }
     }
@@ -166,11 +184,14 @@ impl InputCommand {
         println_message_str(1, "Available commands:").await;
         println_message_str(1, "  list").await;
         println_message_str(1, "  - List and enumerate all discovered peers.").await;
-        println_message_str(1, "  remind").await;
-        println_message_str(1, "  - List and enumerate encrypted and stored sessions.").await;
         println_message_str(1, "  init [entry]").await;
         println_message_str(1, "  - Initialize a chat session with a peer").await;
-        println_message_str(1, "    enumerated as per !list.").await;
+        println_message_str(1, "    enumerated as per 'list'").await;
+        println_message_str(1, "  remind").await;
+        println_message_str(1, "  - List and enumerate encrypted and stored sessions.").await;
+        println_message_str(1, "  rewind [entry]").await;
+        println_message_str(1, "  - Decrypts and displays previous chat sessions").await;
+        println_message_str(1, "    enumerated as per 'remind'.").await;
         println_message_str(1, "  exit").await;
         println_message_str(1, "  - Exit the program.").await;
     }
@@ -178,7 +199,7 @@ impl InputCommand {
         println_message(1, InputCommand::get_small_help()).await;
     }
     fn get_small_help() -> String {
-        "Welcome to Chat-PGP. Type help for help.".to_string()
+        "Welcome to Chat-PGP. Type 'help' for help.".to_string()
     }
     async fn read_yes_or_no(
         window: usize,
@@ -701,6 +722,77 @@ async fn launch_terminal_program(
                             }
                         }
                     }
+                    Some(InputCommand::Rewind(cmd)) => {
+                        let entry = cmd.entry;
+                        let ids = session.get_reminded_session_ids().await;
+                        if ids.len() == 0 || entry > ids.len() || entry <= 0 {
+                            println_message_str(
+                                1,
+                                "There is no memory of that session ¯\\_(ツ)_/¯... {} ",
+                            )
+                            .await;
+                        } else {
+                            let session_log =
+                                session.get_reminded_session_log(&ids[entry - 1]).await;
+                            if session_log.is_err() {
+                                println_message_str(1, "Sorry. This did not work ¯\\_(ツ)_/¯... ")
+                                    .await;
+                            } else {
+                                let (encrypted_sym_key, logs) = session_log.unwrap();
+                                println_message_str(
+                                    1,
+                                    "Decrypting stored encrypted session key...",
+                                )
+                                .await;
+                                let sym_key =
+                                    session.decrypt_encrypted_str(encrypted_sym_key).await;
+
+                                if sym_key.is_ok() {
+                                    println_message_str(1, "Restored session key.").await;
+                                    println_message_str(1, "Decrypting memory.").await;
+                                    let sym_key = sym_key.unwrap();
+                                    for msg in logs {
+                                        match msg.message {
+                                            Encrypted(msg) => {
+                                                let hidden_msg = session
+                                                    .decrypt_sym_encrypted_msg(
+                                                        sym_key.clone(),
+                                                        msg.data.clone(),
+                                                    )
+                                                    .await;
+                                                if hidden_msg.is_ok() {
+                                                    let msg = hidden_msg.unwrap();
+                                                    match msg.message {
+                                                        Chat(msg) => {
+                                                            println_message(
+                                                                1,
+                                                                format!(
+                                                                    "[{}] {} ({})- {}",
+                                                                    msg.date_time,
+                                                                    msg.sender_userid,
+                                                                    short_fingerprint(
+                                                                        &msg.sender_fingerprint
+                                                                    ),
+                                                                    msg.message
+                                                                ),
+                                                            )
+                                                            .await;
+                                                        }
+                                                        _ => {}
+                                                    }
+                                                }
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                } else {
+                                    println_message_str(1, "Sorry. Cannot read that memory.. Perhaps you were using a different PGP key?")
+                                    .await;
+                                }
+                            }
+                        }
+                    }
+
                     None => {
                         // Send this input to listeners
                         if input.len() > 0 && session.get_number_of_sessions().await > 0 {
@@ -720,7 +812,14 @@ async fn launch_terminal_program(
                                             let fingerprint =
                                                 pub_encro.get_public_key_fingerprint();
                                             let topic_out = Topic::messaging_topic_in(&fingerprint);
-                                            let msg = SessionMessage::new_chat(input.clone());
+                                            let fingerprint = session.get_fingerprint().await;
+                                            let userid = session.get_userid().await;
+
+                                            let msg = SessionMessage::new_chat(
+                                                input.clone(),
+                                                userid.clone(),
+                                                fingerprint.clone(),
+                                            );
                                             let _ = session
                                                 .session_send_msg(
                                                     &id,
@@ -729,8 +828,6 @@ async fn launch_terminal_program(
                                                     &zenoh_handler,
                                                 )
                                                 .await;
-                                            let fingerprint = session.get_fingerprint().await;
-                                            let userid = session.get_userid().await;
 
                                             let (_, chat_view) =
                                                 format_chat_msg_fmt(&input, &userid, &fingerprint);
@@ -772,6 +869,7 @@ async fn main() {
     let test_sender = cli.test_sender;
     let test_receiver = cli.test_receiver;
     let zenoh_config = cli.zenoh_config;
+    let memory = !cli.no_memory;
 
     let mut cert = None;
 
@@ -801,7 +899,7 @@ async fn main() {
     let cert = Arc::new(cert.unwrap());
 
     let pgp_handler = PGPEnDeCrypt::new(cert.clone(), &passphrase);
-    let mut session = Session::new(pgp_handler, zenoh_config.clone(), false);
+    let mut session = Session::new(pgp_handler, zenoh_config.clone(), false, memory);
 
     if test_receiver {
         session.set_discovery_interval_seconds(1);

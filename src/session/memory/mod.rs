@@ -85,7 +85,12 @@ impl Memory {
 
     /// Returns a Vec of Strings containing the session_ids in the session_log.
     pub fn get_session_ids(&self) -> Vec<String> {
-        self.session_log.keys().cloned().collect()
+        let mut session_logs: Vec<&SessionLog> = self.session_log.values().collect();
+        session_logs.sort_by(|a, b| b.last_active.cmp(&a.last_active));
+        session_logs
+            .iter()
+            .map(|log| log.session_id.clone())
+            .collect()
     }
 
     pub fn get_others(&self, session_id: &str) -> Result<Vec<String>, ()> {
