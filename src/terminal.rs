@@ -31,6 +31,7 @@ unsafe impl Sync for WindowManager {}
 pub struct PrintCommand {
     pub window: usize,
     pub message: String,
+    pub style: TextStyle,
 }
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ChatClosedCommand {
@@ -165,11 +166,12 @@ impl WindowManager {
     }
 }
 
-#[derive(Clone)]
-enum TextStyle {
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub enum TextStyle {
     Italic,
     Bold,
     Normal,
+    Blinking,
 }
 
 #[derive(Clone)]
@@ -330,6 +332,7 @@ impl App {
             .send(Some(WindowCommand::Println(PrintCommand {
                 window: 1,
                 message: input,
+                style: TextStyle::Normal,
             })))
             .await;
     }
@@ -467,11 +470,11 @@ impl App {
                 match timeout(timeout_duration, pipe.read()).await {
                     Ok(Ok(command)) => match command {
                         WindowCommand::Print(cmd) => {
-                            app.set_last_message(cmd.window, cmd.message, TextStyle::Normal)
+                            app.set_last_message(cmd.window, cmd.message, cmd.style)
                                 .await;
                         }
                         WindowCommand::Println(cmd) => {
-                            app.write_new_message(cmd.message, TextStyle::Normal).await;
+                            app.write_new_message(cmd.message, cmd.style).await;
                         }
                         WindowCommand::ChatClosed(cmd) => {
                             app.write_new_message(cmd.message, TextStyle::Bold).await;
@@ -680,6 +683,9 @@ impl App {
                         }
                         TextStyle::Bold => {
                             s = s.bold();
+                        }
+                        TextStyle::Blinking => {
+                            s = s.add_modifier(Modifier::RAPID_BLINK);
                         }
                     }
                     Line::from(s)

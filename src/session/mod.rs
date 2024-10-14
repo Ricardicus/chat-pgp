@@ -20,7 +20,7 @@ use crypto::{
     CrypticalID, CrypticalSign, CrypticalVerify, PGPEnCryptOwned, PGPEnDeCrypt,
 };
 use futures::prelude::*;
-use memory::Memory;
+use memory::{Memory, SessionLogMessage};
 use messages::MessageData::{
     Chat, Close, Discovery, DiscoveryReply, Encrypted, Heartbeat, Init, InitAwait, InitDecline,
     InitOk, Internal, Ping, Replay, ReplayResponse,
@@ -1190,7 +1190,6 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
         response.session_id = message.session_id.clone();
         let session_id = message.session_id.clone();
         let incoming_message = message.clone();
-        let _msg_raw = message.to_string();
 
         match message.message {
             Internal(msg) => {
@@ -1668,6 +1667,13 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                     let msg = Message::new_replay(session_id.to_string());
                     let topic = Topic::replay_topic(&session_id);
                     return Ok(Some((msg, topic)));
+                } else if self.memory.lock().await.in_memory(&session_id) {
+                    let _ = self
+                        .memory
+                        .lock()
+                        .await
+                        .add_entry_message(&session_id, incoming_message.clone());
+                    Ok(None)
                 } else {
                     return Err(SessionErrorMsg {
                         code: SessionErrorCodes::InvalidPublicKey as u32,
@@ -1676,6 +1682,24 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                 }
             }
             Encrypted(msg) => {
+                let session_key_old = self.memory.lock().await.get_encrypted_sym_key(&session_id);
+                if session_key_old.is_ok() {
+                    // decrypt the encrypted symmetrical key
+                    let session_key_old = session_key_old.unwrap();
+                    let sym_key = self.decrypt_encrypted_str(session_key_old).await;
+                    if sym_key.is_ok() {
+                        let sym_key = sym_key.unwrap();
+                        let dec_msg = self
+                            .decrypt_sym_encrypted_msg(sym_key.clone(), msg.data.clone())
+                            .await;
+
+                        if dec_msg.is_ok() {
+                            let dec_msg = dec_msg.unwrap();
+                            let _ = self.handle_message(dec_msg, topic, relay).await;
+                        }
+                    }
+                }
+
                 let dec_msg;
                 {
                     let sm = &self.sessions.lock().await;
@@ -1856,7 +1880,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
     pub async fn get_reminded_session_log(
         &self,
         session_id: &str,
-    ) -> Result<(String, Vec<Message>), ()> {
+    ) -> Result<(String, Vec<SessionLogMessage>), ()> {
         self.memory.lock().await.get_session_log(session_id)
     }
 }

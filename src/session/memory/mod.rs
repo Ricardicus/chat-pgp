@@ -7,12 +7,18 @@ use std::fs::File;
 use std::io::{self, Read, Write};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct SessionLogMessage {
+    pub message: SessionMessage,
+    pub read: bool,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
 struct SessionLog {
     pub session_id: String,
     pub encrypted_session_key: String,
     pub last_active: String,
     pub others: Vec<String>,
-    pub messages: Vec<SessionMessage>,
+    pub messages: Vec<SessionLogMessage>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -75,7 +81,11 @@ impl Memory {
         message: SessionMessage,
     ) -> Result<(), ()> {
         if let Some(session_log) = self.session_log.get_mut(session_id) {
-            session_log.messages.push(message);
+            let session_log_message = SessionLogMessage {
+                read: true,
+                message,
+            };
+            session_log.messages.push(session_log_message);
             session_log.last_active = get_current_datetime();
             Ok(())
         } else {
@@ -91,6 +101,20 @@ impl Memory {
             .iter()
             .map(|log| log.session_id.clone())
             .collect()
+    }
+
+    pub fn in_memory(&self, session_id: &str) -> bool {
+        match self.session_log.get(session_id) {
+            Some(entry) => true,
+            None => false,
+        }
+    }
+
+    pub fn get_encrypted_sym_key(&self, session_id: &str) -> Result<String, ()> {
+        match self.session_log.get(session_id) {
+            Some(entry) => Ok(entry.encrypted_session_key.clone()),
+            None => Err(()),
+        }
     }
 
     pub fn get_others(&self, session_id: &str) -> Result<Vec<String>, ()> {
@@ -119,7 +143,10 @@ impl Memory {
     }
     /// Returns a tuple with the encrypted session key and a vector of session messages
     /// for the given session_id. Returns Err(()) if the session_id does not exist.
-    pub fn get_session_log(&self, session_id: &str) -> Result<(String, Vec<SessionMessage>), ()> {
+    pub fn get_session_log(
+        &self,
+        session_id: &str,
+    ) -> Result<(String, Vec<SessionLogMessage>), ()> {
         if let Some(session_log) = self.session_log.get(session_id) {
             Ok((
                 session_log.encrypted_session_key.clone(),

@@ -37,7 +37,7 @@ use ncurses::*;
 mod terminal;
 use terminal::{
     format_chat_msg, format_chat_msg_fmt, ChatClosedCommand, PrintChatCommand, PrintCommand,
-    SetChatMessagesCommand, WindowCommand, WindowManager, WindowPipe,
+    SetChatMessagesCommand, TextStyle, WindowCommand, WindowManager, WindowPipe,
 };
 
 #[derive(Parser)]
@@ -71,7 +71,21 @@ static PIPE: OnceCell<WindowPipe<WindowCommand>> = OnceCell::const_new();
 async fn println_message(window: usize, message: String) {
     PIPE.get()
         .unwrap()
-        .send(WindowCommand::Println(PrintCommand { window, message }))
+        .send(WindowCommand::Println(PrintCommand {
+            window,
+            message,
+            style: TextStyle::Normal,
+        }))
+        .await;
+}
+async fn println_message_style(window: usize, message: String, style: TextStyle) {
+    PIPE.get()
+        .unwrap()
+        .send(WindowCommand::Println(PrintCommand {
+            window,
+            message,
+            style,
+        }))
         .await;
 }
 async fn println_chat_closed_message(message: String) {
@@ -100,7 +114,11 @@ async fn println_chat_message(chatid: String, message: String) {
 async fn print_message(window: usize, message: String) {
     PIPE.get()
         .unwrap()
-        .send(WindowCommand::Print(PrintCommand { window, message }))
+        .send(WindowCommand::Print(PrintCommand {
+            window,
+            message,
+            style: TextStyle::Normal,
+        }))
         .await;
 }
 
@@ -767,7 +785,9 @@ async fn launch_terminal_program(
                                     println_message_str(1, "Restored session key.").await;
                                     println_message_str(1, "Decrypting memory.").await;
                                     let sym_key = sym_key.unwrap();
-                                    for msg in logs {
+                                    for logmsg in logs {
+                                        let msg = logmsg.message;
+                                        let read = logmsg.read;
                                         match msg.message {
                                             Encrypted(msg) => {
                                                 let hidden_msg = session
@@ -780,19 +800,36 @@ async fn launch_terminal_program(
                                                     let msg = hidden_msg.unwrap();
                                                     match msg.message {
                                                         Chat(msg) => {
-                                                            println_message(
-                                                                1,
-                                                                format!(
-                                                                    "[{}] {} ({})- {}",
-                                                                    msg.date_time,
-                                                                    msg.sender_userid,
-                                                                    short_fingerprint(
-                                                                        &msg.sender_fingerprint
+                                                            if read {
+                                                                println_message_style(
+                                                                    1,
+                                                                    format!(
+                                                                        "[{}] {} ({}) - {}",
+                                                                        msg.date_time,
+                                                                        msg.sender_userid,
+                                                                        short_fingerprint(
+                                                                            &msg.sender_fingerprint
+                                                                        ),
+                                                                        msg.message
                                                                     ),
-                                                                    msg.message
-                                                                ),
-                                                            )
-                                                            .await;
+                                                                    TextStyle::Bold,
+                                                                )
+                                                                .await;
+                                                            } else {
+                                                                println_message(
+                                                                    1,
+                                                                    format!(
+                                                                        "[{}] {} ({})- {}",
+                                                                        msg.date_time,
+                                                                        msg.sender_userid,
+                                                                        short_fingerprint(
+                                                                            &msg.sender_fingerprint
+                                                                        ),
+                                                                        msg.message
+                                                                    ),
+                                                                )
+                                                                .await;
+                                                            }
                                                         }
                                                         _ => {}
                                                     }
