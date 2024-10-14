@@ -126,6 +126,10 @@ struct RewindCommand {
     pub entry: usize,
 }
 #[derive(Serialize, Deserialize, Clone, Debug)]
+struct ForgetCommand {
+    pub entry: usize,
+}
+#[derive(Serialize, Deserialize, Clone, Debug)]
 struct ExitCommand {}
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -136,6 +140,7 @@ enum InputCommand {
     Help(HelpCommand),
     Remind(RemindCommand),
     Rewind(RewindCommand),
+    Forget(ForgetCommand),
 }
 
 impl InputCommand {
@@ -175,6 +180,14 @@ impl InputCommand {
                 let cmd = RewindCommand { entry };
                 Some(InputCommand::Rewind(cmd))
             }
+            Some("forget") => {
+                let entry = match parts.next() {
+                    Some(entry) => entry.parse::<usize>().unwrap(),
+                    None => 0,
+                };
+                let cmd = ForgetCommand { entry };
+                Some(InputCommand::Forget(cmd))
+            }
             _ => None,
         }
     }
@@ -191,6 +204,9 @@ impl InputCommand {
         println_message_str(1, "  - List and enumerate encrypted and stored sessions.").await;
         println_message_str(1, "  rewind [entry]").await;
         println_message_str(1, "  - Decrypts and displays previous chat sessions").await;
+        println_message_str(1, "    enumerated as per 'remind'.").await;
+        println_message_str(1, "  forget [entry]").await;
+        println_message_str(1, "  - Delete the record of a previous chat session").await;
         println_message_str(1, "    enumerated as per 'remind'.").await;
         println_message_str(1, "  exit").await;
         println_message_str(1, "  - Exit the program.").await;
@@ -789,6 +805,32 @@ async fn launch_terminal_program(
                                     println_message_str(1, "Sorry. Cannot read that memory.. Perhaps you were using a different PGP key?")
                                     .await;
                                 }
+                            }
+                        }
+                    }
+                    Some(InputCommand::Forget(cmd)) => {
+                        let entry = cmd.entry;
+                        let ids = session.get_reminded_session_ids().await;
+                        if ids.len() == 0 || entry > ids.len() || entry <= 0 {
+                            println_message_str(
+                                1,
+                                "There is no memory of that session ¯\\_(ツ)_/¯...",
+                            )
+                            .await;
+                        } else {
+                            let id = &ids[entry - 1];
+                            let last_active = session.get_reminded_last_active(id).await;
+                            if last_active.is_ok() {
+                                println_message_str(1,
+                                    &format!("-- Are you sure you want to delete this session memory from {}? [y/n]",
+                                    last_active.unwrap()),
+                                )
+                                .await;
+                            }
+                            let r = InputCommand::read_yes_or_no(1, ">> ", &mut rx).await;
+                            if r.is_ok() && r.unwrap() {
+                                let _ = session.remove_memory_entry(&ids[entry - 1]).await;
+                                println_message_str(1, "The memory has been removed!").await;
                             }
                         }
                     }

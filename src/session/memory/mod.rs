@@ -111,7 +111,12 @@ impl Memory {
             None => Err(()),
         }
     }
-
+    pub fn delete_session(&mut self, session_id: &str) -> Result<usize, ()> {
+        match self.session_log.remove(session_id) {
+            Some(entry) => Ok(entry.messages.len()),
+            None => Err(()),
+        }
+    }
     /// Returns a tuple with the encrypted session key and a vector of session messages
     /// for the given session_id. Returns Err(()) if the session_id does not exist.
     pub fn get_session_log(&self, session_id: &str) -> Result<(String, Vec<SessionMessage>), ()> {

@@ -303,7 +303,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
             return Err(());
         }
         let cert = cert.unwrap();
-        let fingerprint = cert.fingerprint().to_string();
+        let _fingerprint = cert.fingerprint().to_string();
 
         {
             let mut hm = self.sessions.lock().await;
@@ -735,7 +735,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
             }
             while keep_running {
                 {
-                    let mut sessions;
+                    let sessions;
                     let session_ids: Vec<String>;
                     {
                         sessions = sessions_clone.lock().await;
@@ -1246,7 +1246,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                     return Ok(None);
                 }
                 for message in msg.messages {
-                    self.handle_message(message, topic, relay).await;
+                    let _ = self.handle_message(message, topic, relay).await;
                 }
                 return Ok(None);
             }
@@ -1659,7 +1659,8 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                     let pub_key = session_data.pub_key.clone();
                     self.call_callbacks_chat(&pub_key, &msg.message).await;
                     if self.memory_active {
-                        self.memory
+                        let _ = self
+                            .memory
                             .lock()
                             .await
                             .add_entry_message(&session_id.clone(), incoming_message.clone());
@@ -1848,6 +1849,9 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
     }
     pub async fn get_reminded_last_active(&self, session_id: &str) -> Result<String, ()> {
         self.memory.lock().await.get_last_active(session_id)
+    }
+    pub async fn remove_memory_entry(&self, session_id: &str) -> Result<usize, ()> {
+        self.memory.lock().await.delete_session(session_id)
     }
     pub async fn get_reminded_session_log(
         &self,
