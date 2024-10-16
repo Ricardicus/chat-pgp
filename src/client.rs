@@ -148,6 +148,10 @@ struct ForgetCommand {
     pub entry: usize,
 }
 #[derive(Serialize, Deserialize, Clone, Debug)]
+struct EmailCommand {
+    pub entry: usize,
+}
+#[derive(Serialize, Deserialize, Clone, Debug)]
 struct ExitCommand {}
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -159,6 +163,7 @@ enum InputCommand {
     Remind(RemindCommand),
     Rewind(RewindCommand),
     Forget(ForgetCommand),
+    Email(EmailCommand),
 }
 
 impl InputCommand {
@@ -205,6 +210,14 @@ impl InputCommand {
                 };
                 let cmd = ForgetCommand { entry };
                 Some(InputCommand::Forget(cmd))
+            }
+            Some("email") => {
+                let entry = match parts.next() {
+                    Some(entry) => entry.parse::<usize>().unwrap(),
+                    None => 0,
+                };
+                let cmd = EmailCommand { entry };
+                Some(InputCommand::Email(cmd))
             }
             _ => None,
         }
@@ -871,7 +884,7 @@ async fn launch_terminal_program(
                             }
                         }
                     }
-
+                    Some(_) => {}
                     None => {
                         // Send this input to listeners
                         if input.len() > 0 && session.get_number_of_sessions().await > 0 {

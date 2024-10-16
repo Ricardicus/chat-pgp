@@ -82,6 +82,12 @@ pub struct EncryptedMsg {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct EmailMsg {
+    pub session_id: String,
+    pub message: EncryptedMsg,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct DiscoveryMsg {
     pub pub_key: String,
 }
@@ -137,6 +143,7 @@ pub enum MessageData {
     Heartbeat(HeartbeatMsg),
     Replay(ReplayMsg),
     ReplayResponse(ReplayResponseMsg),
+    Email(EmailMsg),
 }
 
 #[derive(Serialize, Deserialize, Debug)]

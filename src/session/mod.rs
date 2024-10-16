@@ -22,13 +22,13 @@ use crypto::{
 use futures::prelude::*;
 use memory::{Memory, SessionLogMessage};
 use messages::MessageData::{
-    Chat, Close, Discovery, DiscoveryReply, Encrypted, Heartbeat, Init, InitAwait, InitDecline,
-    InitOk, Internal, Ping, Replay, ReplayResponse,
+    Chat, Close, Discovery, DiscoveryReply, Email, Encrypted, Heartbeat, Init, InitAwait,
+    InitDecline, InitOk, Internal, Ping, Replay, ReplayResponse,
 };
 use messages::MessagingError::*;
 use messages::SessionMessage as Message;
 use messages::{
-    ChatMsg, EncryptedMsg, MessageData, MessageListener, MessagebleTopicAsync,
+    ChatMsg, EmailMsg, EncryptedMsg, MessageData, MessageListener, MessagebleTopicAsync,
     MessagebleTopicAsyncPublishReads, MessagebleTopicAsyncReadTimeout, MessagingError, ReplayMsg,
     SessionErrorCodes, SessionErrorMsg,
 };
@@ -982,11 +982,6 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                             _ => {}
                         }
                     }
-                    if session_id.len() > 0 {
-                        if self.relay {
-                            relay.put_message(session_id.clone(), msg.clone());
-                        }
-                    }
                     match self.handle_message(msg, &topic, &mut relay).await {
                         Ok(Some(res)) => {
                             // Do something
@@ -1741,6 +1736,20 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                     });
                 }
             }
+            Email(msg) => {
+                let session_id = msg.session_id;
+                if self.relay {
+                    let msg = Message {
+                        session_id: session_id.clone(),
+                        message: MessageData::Encrypted(msg.message),
+                    };
+                    relay.put_message(session_id, msg);
+                } else {
+                    // Store this in memory if it exists
+                    if self.memory.lock().await.in_memory(&session_id) {}
+                }
+                Ok(None)
+            }
             _ => {
                 // Do something
                 Err(SessionErrorMsg {
@@ -1882,6 +1891,42 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
         session_id: &str,
     ) -> Result<(String, Vec<SessionLogMessage>), ()> {
         self.memory.lock().await.get_session_log(session_id)
+    }
+    pub async fn send_email<T: MessagebleTopicAsync + MessagebleTopicAsyncReadTimeout>(
+        &self,
+        session_id: &str,
+        message: String,
+        topic_tx: &str,
+        gateway: &T,
+    ) -> Result<(), ()> {
+        let session_key_old = self.memory.lock().await.get_encrypted_sym_key(&session_id);
+        if session_key_old.is_ok() {
+            // decrypt the encrypted symmetrical key
+            let session_key_old = session_key_old.unwrap();
+            let sym_key = self.decrypt_encrypted_str(session_key_old).await;
+            if sym_key.is_ok() {
+                let sym_key = sym_key.unwrap();
+                let cipher = ChaCha20Poly1305EnDeCrypt::new_from_str(&sym_key);
+
+                let msg_encrypted = match cipher.encrypt(&message) {
+                    Ok(m) => m,
+                    Err(_) => {
+                        return Err(());
+                    }
+                };
+                let msg = EncryptedMsg {
+                    data: msg_encrypted,
+                };
+                let msg_enc =
+                    Message::new_from_data(session_id.to_string(), MessageData::Encrypted(msg));
+
+                match gateway.send_message(topic_tx, msg_enc).await {
+                    Ok(_) => {}
+                    Err(_error) => return Err(()),
+                };
+            }
+        }
+        Ok(())
     }
 }
 
