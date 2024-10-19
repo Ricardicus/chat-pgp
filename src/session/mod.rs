@@ -915,15 +915,12 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
         let discover_topic = Topic::Discover.to_string();
         let heartbeat_topic = Topic::heartbeat_topic(identifier.as_ref());
 
-        topics_to_subscribe.push(init_topic);
-        topics_to_subscribe.push(close_topic);
-
         if self.relay {
-            let messaging_topic = Topic::messaging_topic_in(identifier.as_ref());
-            let replay_topic = Topic::replay_topic(identifier.as_ref());
-            topics_to_subscribe.push(messaging_topic);
-            topics_to_subscribe.push(replay_topic);
+            let email_topic = Topic::email_topic(identifier.as_ref());
+            topics_to_subscribe.push(email_topic);
         } else {
+            topics_to_subscribe.push(init_topic);
+            topics_to_subscribe.push(close_topic);
             topics_to_subscribe.push(discover_topic);
             topics_to_subscribe.push(heartbeat_topic);
         }
@@ -1739,6 +1736,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
             Email(msg) => {
                 let session_id = msg.session_id;
                 if self.relay {
+                    println!("Received email from session {}", session_id);
                     let msg = Message {
                         session_id: session_id.clone(),
                         message: MessageData::Encrypted(msg.message),
@@ -1896,9 +1894,9 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
         &self,
         session_id: &str,
         message: String,
-        topic_tx: &str,
         gateway: &T,
     ) -> Result<(), ()> {
+        let topic = Topic::email_topic(&session_id);
         let session_key_old = self.memory.lock().await.get_encrypted_sym_key(&session_id);
         if session_key_old.is_ok() {
             // decrypt the encrypted symmetrical key
@@ -1920,7 +1918,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                 let msg_enc =
                     Message::new_from_data(session_id.to_string(), MessageData::Encrypted(msg));
 
-                match gateway.send_message(topic_tx, msg_enc).await {
+                match gateway.send_message(&topic, msg_enc).await {
                     Ok(_) => {}
                     Err(_error) => return Err(()),
                 };

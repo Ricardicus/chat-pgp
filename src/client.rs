@@ -26,7 +26,7 @@ mod util;
 use util::{get_current_datetime, short_fingerprint};
 
 mod pgp;
-use pgp::pgp::{generate_new_key, read_from_gpg, read_from_vec};
+use pgp::pgp::{generate_new_key_with, read_from_gpg, read_from_vec};
 
 extern crate sequoia_openpgp as openpgp;
 use openpgp::cert::prelude::*;
@@ -63,6 +63,10 @@ struct Cli {
     #[clap(short, long)]
     #[arg(default_value = "zenoh/config.json5")]
     zenoh_config: String,
+
+    #[clap(short, long)]
+    #[arg(default_value = "chatpgp@example.com")]
+    email: String,
 }
 
 // Create a global instance of WindowManager
@@ -239,6 +243,13 @@ impl InputCommand {
         println_message_str(1, "  forget [entry]").await;
         println_message_str(1, "  - Delete the record of a previous chat session").await;
         println_message_str(1, "    enumerated as per 'remind'.").await;
+        println_message_str(1, "  email [entry]").await;
+        println_message_str(
+            1,
+            "  - Send an email to someone encrypted as per a previous session",
+        )
+        .await;
+        println_message_str(1, "    enumerated as per 'remind'.").await;
         println_message_str(1, "  exit").await;
         println_message_str(1, "  - Exit the program.").await;
     }
@@ -269,6 +280,25 @@ impl InputCommand {
             }
         }
         Ok(false)
+    }
+    async fn read_incoming(
+        prompt: &str,
+        rx: &mut mpsc::Receiver<Option<WindowCommand>>,
+    ) -> Result<String, ()> {
+        println_message_style(1, prompt.to_string(), TextStyle::Bold).await;
+        let input = rx.recv().await;
+        if input.is_some() {
+            let input = input.unwrap();
+            if input.is_some() {
+                let input = input.unwrap();
+                let input = match input {
+                    WindowCommand::Println(input) => input.message,
+                    _ => "".into(),
+                };
+                return Ok(input);
+            }
+        }
+        Err(())
     }
 }
 
@@ -884,7 +914,46 @@ async fn launch_terminal_program(
                             }
                         }
                     }
-                    Some(_) => {}
+                    Some(InputCommand::Email(cmd)) => {
+                        let entry = cmd.entry;
+                        let ids = session.get_reminded_session_ids().await;
+                        if ids.len() == 0 || entry > ids.len() || entry <= 0 {
+                            println_message_str(
+                                1,
+                                "There is no memory of that session ¯\\_(ツ)_/¯...",
+                            )
+                            .await;
+                        } else {
+                            let session_id = &ids[entry - 1];
+                            let content =
+                                InputCommand::read_incoming("Write email content", &mut rx).await;
+                            if content.is_ok() {
+                                let content = content.unwrap();
+                                println_message_str(1, "Sending message...").await;
+                                let res = session
+                                    .send_email(session_id, content, &zenoh_handler)
+                                    .await;
+                                if res.is_err() {
+                                    println_message_style(
+                                        1,
+                                        "Failed to send the email".to_string(),
+                                        TextStyle::Bold,
+                                    )
+                                    .await;
+                                } else {
+                                    println_message_style(
+                                        1,
+                                        "Email sent".to_string(),
+                                        TextStyle::Bold,
+                                    )
+                                    .await;
+                                }
+                            } else {
+                                println_message_str(1, "Failed to send that email ¯\\_(ツ)_/¯...")
+                                    .await;
+                            }
+                        }
+                    }
                     None => {
                         // Send this input to listeners
                         if input.len() > 0 && session.get_number_of_sessions().await > 0 {
@@ -962,12 +1031,13 @@ async fn main() {
     let test_receiver = cli.test_receiver;
     let zenoh_config = cli.zenoh_config;
     let memory = !cli.no_memory;
+    let email = cli.email;
 
     let mut cert = None;
 
     // check if gpgkey == "new"
     if gpgkey == "new" {
-        cert = Some(generate_new_key().unwrap());
+        cert = Some(generate_new_key_with(email).unwrap());
     }
 
     let mut passphrase = String::new();

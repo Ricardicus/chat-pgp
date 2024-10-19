@@ -9,6 +9,7 @@ pub enum Topic {
     Close,
     Heartbeat,
     Replay,
+    Email,
 }
 
 impl Topic {
@@ -23,6 +24,7 @@ impl Topic {
             Topic::Close => "v1/session/close",
             Topic::Heartbeat => "v1/session/heartbeat",
             Topic::Replay => "v1/session/replay",
+            Topic::Email => "v1/email",
         }
     }
     pub fn to_string(&self) -> String {
@@ -35,6 +37,12 @@ impl Topic {
     }
     pub fn reply_suffix() -> &'static str {
         "/reply"
+    }
+    pub fn email_topic(session_id: &str) -> String {
+        let mut t = Topic::Email.as_str().to_string();
+        t.push_str("/");
+        t.push_str(session_id);
+        t
     }
     pub fn messaging_topic_in(fingerprint: &str) -> String {
         let mut t = Topic::Message.as_str().to_string();
