@@ -8,7 +8,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Mutex};
 use tokio::time::timeout;
-use zenoh::prelude::*;
 
 pub struct ZMQHandler {
     context: zmq::Context,
@@ -94,15 +93,15 @@ impl ZenohHandler {
 impl MessagebleTopicAsync for ZenohHandler {
     async fn read_message(&self, topic: &str) -> Result<SessionMessage, MessagingError> {
         let s = self.session.lock().await;
-        let subscriber = zenoh::AsyncResolve::res(s.declare_subscriber(topic))
+        let subscriber = s.declare_subscriber(topic)
             .await
             .unwrap();
         match subscriber.recv_async().await {
             Ok(incoming) => {
                 let incoming = incoming
                     .payload()
-                    .deserialize::<String>()
-                    .unwrap_or_else(|e| format!("{}", e));
+                    .try_to_string()
+                    .unwrap_or_else(|e| format!("{}", e).into());
                 return match SessionMessage::deserialize(&incoming) {
                     Ok(message) => Ok(message),
                     Err(_) => {
@@ -122,7 +121,7 @@ impl MessagebleTopicAsync for ZenohHandler {
         let message = message.serialize().unwrap();
         let s = self.session.lock().await;
 
-        zenoh::AsyncResolve::res(s.put(topic, message))
+        s.put(topic, message)
             .await
             .unwrap();
         Ok(())
@@ -137,7 +136,7 @@ impl MessagebleTopicAsyncPublishReads for ZenohHandler {
     ) -> Result<(), MessagingError> {
         let mut topic_in = topic.to_string();
         let s = self.session.lock().await;
-        let subscriber = zenoh::AsyncResolve::res(s.declare_subscriber(topic))
+        let subscriber = s.declare_subscriber(topic)
             .await
             .unwrap();
         loop {
@@ -146,8 +145,8 @@ impl MessagebleTopicAsyncPublishReads for ZenohHandler {
                     topic_in = incoming.key_expr().to_string();
                     let incoming = incoming
                         .payload()
-                        .deserialize::<String>()
-                        .unwrap_or_else(|e| format!("{}", e));
+                        .try_to_string()
+                        .unwrap_or_else(|e| format!("{}", e).into());
                     match SessionMessage::deserialize(&incoming) {
                         Ok(message) => Ok(message),
                         Err(_) => {
@@ -181,16 +180,17 @@ impl MessagebleTopicAsyncReadTimeout for ZenohHandler {
         timeout_duration: std::time::Duration,
     ) -> Result<SessionMessage, MessagingError> {
         let s = self.session.lock().await;
-        let subscriber = zenoh::AsyncResolve::res(s.declare_subscriber(topic))
+        let subscriber = s.declare_subscriber(topic)
             .await
             .unwrap();
         match timeout(timeout_duration, subscriber.recv_async()).await {
             Ok(incoming) => {
                 let incoming = incoming
-                    .unwrap()
+                    .unwrap();
+                let incoming = incoming
                     .payload()
-                    .deserialize::<String>()
-                    .unwrap_or_else(|e| format!("{}", e));
+                    .try_to_string()
+                    .unwrap_or_else(|e| format!("{}", e).into());
                 let incoming_str = incoming.to_string();
                 match SessionMessage::deserialize(&incoming_str) {
                     Ok(msg) => Ok(msg),
@@ -207,7 +207,7 @@ impl MessagebleTopicAsyncReadTimeout for ZenohHandler {
     ) -> Result<Vec<SessionMessage>, MessagingError> {
         let mut messages = Vec::new();
         let s = self.session.lock().await;
-        let subscriber = zenoh::AsyncResolve::res(s.declare_subscriber(topic))
+        let subscriber = s.declare_subscriber(topic)
             .await
             .unwrap();
 
@@ -223,8 +223,8 @@ impl MessagebleTopicAsyncReadTimeout for ZenohHandler {
                 Ok(Ok(incoming)) => {
                     let incoming = incoming
                         .payload()
-                        .deserialize::<String>()
-                        .unwrap_or_else(|e| format!("{}", e));
+                        .try_to_string()
+                        .unwrap_or_else(|e| format!("{}", e).into());
                     let incoming_str = incoming.to_string();
                     match SessionMessage::deserialize(&incoming_str) {
                         Ok(msg) => messages.push(msg),

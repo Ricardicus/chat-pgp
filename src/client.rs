@@ -19,7 +19,6 @@ use tokio::sync::{mpsc, Mutex, OnceCell};
 use tokio::time::{timeout, Duration};
 
 use crate::session::middleware::ZenohHandler;
-use zenoh::prelude::r#async::*;
 use zenoh::Config;
 
 mod util;
@@ -463,7 +462,7 @@ async fn launch_terminal_program(
     let zenoh_config = Config::from_file(zc.clone()).unwrap();
     let zenoh_session;
     {
-        let zenoh_connection = zenoh::open(zenoh_config).res().await;
+        let zenoh_connection = zenoh::open(zenoh_config).await;
         if zenoh_connection.is_err() {
             terminate(session.get_tx().await).await;
             return Err(());
