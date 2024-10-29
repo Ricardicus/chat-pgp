@@ -9,6 +9,7 @@ pub enum Topic {
     Close,
     Heartbeat,
     Replay,
+    ReplayRequest,
     Email,
 }
 
@@ -24,6 +25,7 @@ impl Topic {
             Topic::Close => "v1/session/close",
             Topic::Heartbeat => "v1/session/heartbeat",
             Topic::Replay => "v1/session/replay",
+            Topic::ReplayRequest => "v1/session/replay-request",
             Topic::Email => "v1/email",
         }
     }
@@ -65,6 +67,12 @@ impl Topic {
     }
     pub fn replay_topic(session_id: &str) -> String {
         let mut t = Topic::Replay.as_str().to_string();
+        t.push_str("/");
+        t.push_str(session_id);
+        t
+    }
+    pub fn replay_request_topic(session_id: &str) -> String {
+        let mut t = Topic::ReplayRequest.as_str().to_string();
         t.push_str("/");
         t.push_str(session_id);
         t

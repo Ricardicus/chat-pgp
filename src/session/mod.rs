@@ -191,7 +191,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
             heartbeat_interval_seconds: 10,
             relay: relay,
             memory: Arc::new(Mutex::new(
-                Memory::from_file(".memory").unwrap_or_else(|_| Memory::new()),
+                Memory::from_file(memory_file).unwrap_or_else(|_| Memory::new(&memory_file)),
             )),
             memory_active,
             running: Arc::new(Mutex::new(true)),
@@ -312,8 +312,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
         if session_init_ok_msg.is_some() {
             let zc = self.middleware_config.clone();
             let zenoh_config = Config::from_file(zc).unwrap();
-            let zenoh_session =
-                Arc::new(Mutex::new(zenoh::open(zenoh_config).await.unwrap()));
+            let zenoh_session = Arc::new(Mutex::new(zenoh::open(zenoh_config).await.unwrap()));
             let handler = ZenohHandler::new(zenoh_session);
             let msg = session_init_ok_msg.unwrap().clone();
             let _ = self
@@ -592,8 +591,11 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
             let terminate_callbacks = self.callbacks_terminate.clone();
             let running = self.running.clone();
             let h = tokio::spawn(async move {
-                let zenoh_config = Config::from_file(zc).unwrap();
-                let zenoh_session = zenoh::open(zenoh_config.clone()).await;
+                let zenoh_session;
+                {
+                    let zenoh_config = Config::from_file(zc).unwrap();
+                    zenoh_session = zenoh::open(zenoh_config.clone()).await;
+                }
 
                 if zenoh_session.is_err() {
                     let callbacks = terminate_callbacks.lock().await;
@@ -916,7 +918,9 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
 
         if self.relay {
             let email_topic = Topic::email_topic(identifier.as_ref());
+            let replay_topic = Topic::replay_request_topic(identifier.as_ref());
             topics_to_subscribe.push(email_topic);
+            topics_to_subscribe.push(replay_topic);
         } else {
             topics_to_subscribe.push(init_topic);
             topics_to_subscribe.push(close_topic);
@@ -928,14 +932,39 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
         self.serve_topics(topics_to_subscribe, &tx_clone, false)
             .await;
         let zc = self.middleware_config.clone();
-        let zenoh_config = Config::from_file(zc).unwrap();
-        let zenoh_session = zenoh::open(zenoh_config).await;
+        let zenoh_session;
+        {
+            let zenoh_config = Config::from_file(zc).unwrap();
+            zenoh_session = zenoh::open(zenoh_config).await;
+        }
         if zenoh_session.is_err() {
             return Err(MessagingError::ZenohError);
         }
         let zenoh_session = zenoh_session.unwrap();
         let zenoh_session_responder = Arc::new(Mutex::new(zenoh_session));
         let responder = Arc::new(Mutex::new(ZenohHandler::new(zenoh_session_responder)));
+
+        // Set up listeners for memory retrieval
+        {
+            let mut memory_topics = Vec::new();
+            for session_id in self.memory.lock().await.get_session_ids() {
+                let replay_topic = Topic::replay_topic(&session_id);
+                memory_topics.push(replay_topic);
+            }
+            self.serve_topics(memory_topics, &tx_clone, false).await;
+
+            // Send request for replay
+            for session_id in self.memory.lock().await.get_session_ids() {
+                let replay_request_topic = Topic::replay_request_topic(&session_id);
+                let message = Message::new_replay(replay_request_topic.clone());
+                let _ = responder
+                    .lock()
+                    .await
+                    .send_message(&replay_request_topic, message)
+                    .await;
+            }
+        }
+
         if !self.relay {
             // Send discover message each minut
             self.launch_discovery(responder.clone()).await;
@@ -1018,7 +1047,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
         self.close_sessions(responder).await;
 
         if self.memory_active {
-            let _ = self.memory.lock().await.to_file(".memory");
+            let _ = self.memory.lock().await.to_file();
         }
         return Ok(());
     }

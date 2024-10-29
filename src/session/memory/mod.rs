@@ -24,13 +24,15 @@ struct SessionLog {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Memory {
     session_log: HashMap<String, SessionLog>,
+    file: String,
 }
 
 impl Memory {
     /// Creates a new empty Memory instance.
-    pub fn new() -> Self {
+    pub fn new(file: &str) -> Self {
         Self {
             session_log: HashMap::new(),
+            file: file.to_string(),
         }
     }
 
@@ -40,9 +42,9 @@ impl Memory {
     }
 
     /// Writes the serialized content of Memory to a file at the given path.
-    pub fn to_file(&self, path: &str) -> io::Result<()> {
+    pub fn to_file(&self) -> io::Result<()> {
         let serialized = self.serialize();
-        let mut file = File::create(path)?;
+        let mut file = File::create(&self.file)?;
         file.write_all(&serialized)?;
         Ok(())
     }
