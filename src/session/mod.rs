@@ -35,7 +35,6 @@ use messages::{
 use middleware::ZenohHandler;
 use protocol::*;
 use ringbuffer::{AllocRingBuffer, RingBuffer};
-use zenoh::prelude::r#async::*;
 use zenoh::Config;
 
 #[derive(PartialEq, Clone)]
@@ -314,7 +313,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
             let zc = self.middleware_config.clone();
             let zenoh_config = Config::from_file(zc).unwrap();
             let zenoh_session =
-                Arc::new(Mutex::new(zenoh::open(zenoh_config).res().await.unwrap()));
+                Arc::new(Mutex::new(zenoh::open(zenoh_config).await.unwrap()));
             let handler = ZenohHandler::new(zenoh_session);
             let msg = session_init_ok_msg.unwrap().clone();
             let _ = self
@@ -559,7 +558,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
         topic.push_str(&cert.fingerprint().to_string());
         let zc = self.middleware_config.clone();
         let zenoh_config = Config::from_file(zc).unwrap();
-        let zenoh_session = zenoh::open(zenoh_config).res().await;
+        let zenoh_session = zenoh::open(zenoh_config).await;
         if zenoh_session.is_err() {
             return Err("Something wrong with the middleware, cannot reach the server!".into());
         }
@@ -594,7 +593,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
             let running = self.running.clone();
             let h = tokio::spawn(async move {
                 let zenoh_config = Config::from_file(zc).unwrap();
-                let zenoh_session = zenoh::open(zenoh_config.clone()).res().await;
+                let zenoh_session = zenoh::open(zenoh_config.clone()).await;
 
                 if zenoh_session.is_err() {
                     let callbacks = terminate_callbacks.lock().await;
@@ -930,7 +929,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
             .await;
         let zc = self.middleware_config.clone();
         let zenoh_config = Config::from_file(zc).unwrap();
-        let zenoh_session = zenoh::open(zenoh_config).res().await;
+        let zenoh_session = zenoh::open(zenoh_config).await;
         if zenoh_session.is_err() {
             return Err(MessagingError::ZenohError);
         }
