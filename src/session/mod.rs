@@ -918,10 +918,11 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
 
         if self.relay {
             let email_topic = Topic::email_topic(identifier.as_ref());
-            let replay_topic = Topic::replay_request_topic(identifier.as_ref());
+            let replay_topic = Topic::replay_topic(identifier.as_ref());
             topics_to_subscribe.push(email_topic);
             topics_to_subscribe.push(replay_topic);
         } else {
+            let replay_response_topic = Topic::replay_response_topic(identifier.as_ref());
             topics_to_subscribe.push(init_topic);
             topics_to_subscribe.push(close_topic);
             topics_to_subscribe.push(discover_topic);
@@ -955,7 +956,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
 
             // Send request for replay
             for session_id in self.memory.lock().await.get_session_ids() {
-                let replay_request_topic = Topic::replay_request_topic(&session_id);
+                let replay_request_topic = Topic::replay_topic(&session_id);
                 let message = Message::new_replay(replay_request_topic.clone());
                 let _ = responder
                     .lock()
@@ -1441,6 +1442,10 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                                 pub_encro.get_public_key_fingerprint(),
                                 session_id
                             );
+                            relay.register_participant(
+                                &pub_encro.get_public_key_fingerprint(),
+                                &session_id.clone(),
+                            );
                         }
 
                         let initialize_this = self.call_callbacks_init_incoming(&pub_key).await;
@@ -1592,6 +1597,10 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                     }
                     let cert = cert.unwrap();
                     let other_key_fingerprint = cert.fingerprint().to_string();
+
+                    if self.relay {
+                        relay.register_participant(&other_key_fingerprint, &session_id);
+                    }
 
                     for (pending_fingerprint, pending_challenge) in pendings.iter() {
                         let pending_pub_key_fingerprint = pending_fingerprint.clone();
@@ -1965,6 +1974,7 @@ struct SessionRelayEntry {
 #[derive(Clone)]
 struct SessionRelay {
     pub memory: HashMap<String, SessionRelayEntry>,
+    pub keys_to_sessions: HashMap<String, Vec<String>>,
     pub max_sessions: usize,
     pub max_messages: usize,
 }
@@ -1990,6 +2000,7 @@ impl SessionRelay {
     pub fn new(max_sessions: usize, max_messages: usize) -> Self {
         Self {
             memory: HashMap::new(),
+            keys_to_sessions: HashMap::new(),
             max_messages,
             max_sessions,
         }
@@ -2034,5 +2045,20 @@ impl SessionRelay {
     }
     pub fn remove_entry(&mut self, session_id: &str) {
         self.memory.remove(session_id);
+    }
+    pub fn register_participant(&mut self, key: &str, session_id: &str) {
+        println!("");
+        match self.keys_to_sessions.get_mut(key) {
+            Some(ids) => {
+                if ids.contains(&session_id.to_string()) {
+                    ids.push(session_id.to_string());
+                }
+            }
+            None => {
+                let mut vec = Vec::new();
+                vec.push(session_id.to_string());
+                self.keys_to_sessions.insert(key.to_string(), vec);
+            }
+        }
     }
 }
