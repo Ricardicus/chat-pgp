@@ -35,8 +35,9 @@ use ncurses::*;
 
 mod terminal;
 use terminal::{
-    format_chat_msg, format_chat_msg_fmt, ChatClosedCommand, PrintChatCommand, PrintCommand,
-    SetChatMessagesCommand, TextStyle, WindowCommand, WindowManager, WindowPipe,
+    format_chat_msg, format_chat_msg_fmt, AppCurrentState, ChatClosedCommand, PrintChatCommand,
+    PrintCommand, SetAppStateCommand, SetChatMessagesCommand, TextStyle, WindowCommand,
+    WindowManager, WindowPipe,
 };
 
 #[derive(Parser)]
@@ -102,6 +103,14 @@ async fn chat_reset_messages() {
         .unwrap()
         .send(WindowCommand::SetChatMessages(SetChatMessagesCommand {
             chat_messages: Vec::new(),
+        }))
+        .await;
+}
+async fn set_app_state(state: AppCurrentState) {
+    PIPE.get()
+        .unwrap()
+        .send(WindowCommand::SetAppState(SetAppStateCommand {
+            state: AppCurrentState::Commands,
         }))
         .await;
 }
@@ -379,11 +388,8 @@ async fn cb_closed(public_key: String, _session_id: String) {
             ))
             .await;
 
-            // Spawn a new process
-            tokio::spawn(async move {
-                tokio::time::sleep(Duration::from_secs(1)).await;
-                chat_reset_messages().await;
-            });
+            set_app_state(AppCurrentState::Commands).await;
+            chat_reset_messages().await;
         }
         _ => {}
     }
@@ -612,6 +618,8 @@ async fn launch_terminal_program(
                         .await;
 
                     keep_running = false;
+
+                    terminate(session_tx.clone()).await;
                     continue;
                 }
                 let input = input.unwrap();
