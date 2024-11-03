@@ -93,9 +93,7 @@ impl ZenohHandler {
 impl MessagebleTopicAsync for ZenohHandler {
     async fn read_message(&self, topic: &str) -> Result<SessionMessage, MessagingError> {
         let s = self.session.lock().await;
-        let subscriber = s.declare_subscriber(topic)
-            .await
-            .unwrap();
+        let subscriber = s.declare_subscriber(topic).await.unwrap();
         match subscriber.recv_async().await {
             Ok(incoming) => {
                 let incoming = incoming
@@ -121,9 +119,7 @@ impl MessagebleTopicAsync for ZenohHandler {
         let message = message.serialize().unwrap();
         let s = self.session.lock().await;
 
-        s.put(topic, message)
-            .await
-            .unwrap();
+        s.put(topic, message).await.unwrap();
         Ok(())
     }
 }
@@ -136,9 +132,7 @@ impl MessagebleTopicAsyncPublishReads for ZenohHandler {
     ) -> Result<(), MessagingError> {
         let mut topic_in = topic.to_string();
         let s = self.session.lock().await;
-        let subscriber = s.declare_subscriber(topic)
-            .await
-            .unwrap();
+        let subscriber = s.declare_subscriber(topic).await.unwrap();
         loop {
             let msg = match subscriber.recv_async().await {
                 Ok(incoming) => {
@@ -180,13 +174,10 @@ impl MessagebleTopicAsyncReadTimeout for ZenohHandler {
         timeout_duration: std::time::Duration,
     ) -> Result<SessionMessage, MessagingError> {
         let s = self.session.lock().await;
-        let subscriber = s.declare_subscriber(topic)
-            .await
-            .unwrap();
+        let subscriber = s.declare_subscriber(topic).await.unwrap();
         match timeout(timeout_duration, subscriber.recv_async()).await {
             Ok(incoming) => {
-                let incoming = incoming
-                    .unwrap();
+                let incoming = incoming.unwrap();
                 let incoming = incoming
                     .payload()
                     .try_to_string()
@@ -207,9 +198,7 @@ impl MessagebleTopicAsyncReadTimeout for ZenohHandler {
     ) -> Result<Vec<SessionMessage>, MessagingError> {
         let mut messages = Vec::new();
         let s = self.session.lock().await;
-        let subscriber = s.declare_subscriber(topic)
-            .await
-            .unwrap();
+        let subscriber = s.declare_subscriber(topic).await.unwrap();
 
         let end_time = Instant::now() + timeout_duration;
 

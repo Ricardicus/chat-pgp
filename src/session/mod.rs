@@ -312,8 +312,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
         if session_init_ok_msg.is_some() {
             let zc = self.middleware_config.clone();
             let zenoh_config = Config::from_file(zc).unwrap();
-            let zenoh_session =
-                Arc::new(Mutex::new(zenoh::open(zenoh_config).await.unwrap()));
+            let zenoh_session = Arc::new(Mutex::new(zenoh::open(zenoh_config).await.unwrap()));
             let handler = ZenohHandler::new(zenoh_session);
             let msg = session_init_ok_msg.unwrap().clone();
             let _ = self

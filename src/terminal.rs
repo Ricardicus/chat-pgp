@@ -60,6 +60,10 @@ pub struct NewWindowCommand {
 pub struct SetChatMessagesCommand {
     pub chat_messages: Vec<String>,
 }
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct SetAppStateCommand {
+    pub state: AppCurrentState,
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum WindowCommand {
@@ -70,6 +74,7 @@ pub enum WindowCommand {
     New(NewWindowCommand),
     ChatClosed(ChatClosedCommand),
     SetChatMessages(SetChatMessagesCommand),
+    SetAppState(SetAppStateCommand),
     Init(),
     Shutdown(),
 }
@@ -166,6 +171,13 @@ impl WindowManager {
     }
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub enum AppCurrentState {
+    Commands,
+    Chat,
+    Request,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum TextStyle {
     Italic,
@@ -188,6 +200,7 @@ struct AppState {
     pub horizontal_position_commands: usize,
     pub scrollstate_chat: ScrollbarState,
     pub scrollstate_commands: ScrollbarState,
+    pub app_current_state: AppCurrentState,
 }
 
 /// App holds the state of the application
@@ -219,6 +232,7 @@ impl App {
                 horizontal_position_commands: 0,
                 scrollstate_chat: ScrollbarState::default(),
                 scrollstate_commands: ScrollbarState::default(),
+                app_current_state: AppCurrentState::Commands,
             })),
             should_run: Arc::new(Mutex::new(true)),
             tx: tx,
@@ -239,7 +253,7 @@ impl App {
     }
 
     async fn is_in_chat_mode(&self) -> bool {
-        self.state.lock().await.chat_messages.len() > 0
+        self.state.lock().await.app_current_state == AppCurrentState::Chat
     }
 
     async fn move_cursor_left(&mut self, len: usize) {
@@ -427,9 +441,17 @@ impl App {
             .scrollstate_chat
             .content_length(state.chat_messages.len());
     }
-    async fn write_new_chat_message(&mut self, chatid: String, message: String) {
+    async fn set_app_state(&mut self, state: AppCurrentState) {
+        self.state.lock().await.app_current_state = state;
+    }
+    async fn set_chatid(&mut self, chatid: String) {
         let mut state = self.state.lock().await;
         state.chatid = chatid;
+    }
+
+    async fn write_new_chat_message(&mut self, chatid: String, message: String) {
+        let mut state = self.state.lock().await;
+        state.chatid = format!("Chatting with {}", chatid);
         state.chat_messages.push(message);
         state.scrollstate_chat = state
             .scrollstate_chat
@@ -478,13 +500,17 @@ impl App {
                         }
                         WindowCommand::ChatClosed(cmd) => {
                             app.write_new_message(cmd.message, TextStyle::Bold).await;
-                            app.clear_chat().await;
+                            app.set_app_state(AppCurrentState::Commands).await;
                         }
                         WindowCommand::PrintChat(cmd) => {
+                            app.set_app_state(AppCurrentState::Chat).await;
                             app.write_new_chat_message(cmd.chatid, cmd.message).await;
                         }
                         WindowCommand::SetChatMessages(cmd) => {
                             app.set_chat_messages(cmd.chat_messages).await;
+                        }
+                        WindowCommand::SetAppState(cmd) => {
+                            app.set_app_state(cmd.state).await;
                         }
                         _ => {}
                     },
@@ -561,7 +587,7 @@ impl App {
                                         TextStyle::Bold,
                                     )
                                     .await;
-                                    app.clear_chat().await;
+                                    app.set_chatid("Closing this chat..".to_string()).await;
                                     let _ = tx
                                         .send(Some(WindowCommand::ChatClosed(ChatClosedCommand {
                                             message: "Closing the chat".to_string(),
@@ -603,195 +629,212 @@ impl App {
         h3.await.unwrap();
     }
 
-    fn draw(frame: &mut Frame, state: &mut AppState) {
+    fn draw_commands_section(frame: &mut Frame, state: &mut AppState) {
         let messages = &state.messages;
         let input = &state.input;
         let input_mode = &state.input_mode;
         let character_index = state.character_index;
         let chat_messages = &state.chat_messages;
         let chatid = &state.chatid;
-
-        if chat_messages.len() == 0 {
-            let vertical = Layout::vertical([
-                Constraint::Length(1),
-                Constraint::Length(3),
-                Constraint::Min(1),
-            ]);
-            let [help_area, input_area, messages_area] = vertical.areas(frame.area());
-            if messages.len() > 0 {
-            } else {
-            }
-            let (msg, style) = match input_mode {
-                InputMode::Normal => (
-                    vec![
-                        "Press ".into(),
-                        "q".bold(),
-                        " to exit, ".into(),
-                        "Space".bold(),
-                        " to write".into(),
-                    ],
-                    Style::default().add_modifier(Modifier::RAPID_BLINK),
-                ),
-                InputMode::Editing => (
-                    vec![
-                        "Press ".into(),
-                        "Esc".bold(),
-                        " to stop editing, ".into(),
-                        "Enter".bold(),
-                        " to submit the message".into(),
-                    ],
-                    Style::default(),
-                ),
-            };
-            let text = Text::from(Line::from(msg)).patch_style(style);
-            let help_message = Paragraph::new(text);
-            frame.render_widget(help_message, help_area);
-
-            let input = Paragraph::new(input.as_str())
-                .style(match input_mode {
-                    InputMode::Normal => Style::default(),
-                    InputMode::Editing => Style::default().fg(Color::Yellow),
-                })
-                .block(Block::bordered().title("Input"));
-            frame.render_widget(input, input_area);
-            match input_mode {
-                // Hide the cursor. `Frame` does this by default, so we don't need to do anything here
-                InputMode::Normal => {}
-
-                // Make the cursor visible and ask ratatui to put it at the specified coordinates after
-                // rendering
-                #[allow(clippy::cast_possible_truncation)]
-                InputMode::Editing => frame.set_cursor_position(Position::new(
-                    // Draw the cursor at the current position in the input field.
-                    // This position is can be controlled via the left and right arrow key
-                    input_area.x + character_index as u16 + 1,
-                    // Move one line down, from the border to the input line
-                    input_area.y + 1,
-                )),
-            }
-
-            let messages: Vec<Line> = messages
-                .iter()
-                .map(|m| {
-                    let message = &m.0;
-                    let style = &m.1;
-                    let mut s = Span::raw(format!("{message}"));
-                    match style {
-                        TextStyle::Normal => {}
-                        TextStyle::Italic => {
-                            s = s.italic();
-                        }
-                        TextStyle::Bold => {
-                            s = s.bold();
-                        }
-                        TextStyle::Blinking => {
-                            s = s.add_modifier(Modifier::RAPID_BLINK);
-                        }
-                    }
-                    Line::from(s)
-                })
-                .collect();
-            let messages = Paragraph::new(messages)
-                .block(Block::bordered().title("Commands"))
-                .scroll((
-                    state.vertical_position_commands.try_into().unwrap(),
-                    state.horizontal_position_chat.try_into().unwrap(),
-                ));
-            let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-                .begin_symbol(Some("↑"))
-                .end_symbol(Some("↓"));
-            frame.render_widget(messages, messages_area);
-            frame.render_stateful_widget(
-                scrollbar,
-                messages_area.inner(Margin {
-                    // using an inner vertical margin of 1 unit makes the scrollbar inside the block
-                    vertical: 1,
-                    horizontal: 0,
-                }),
-                &mut state.scrollstate_commands,
-            );
+        let vertical = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Length(3),
+            Constraint::Min(1),
+        ]);
+        let [help_area, input_area, messages_area] = vertical.areas(frame.area());
+        if messages.len() > 0 {
         } else {
-            let vertical = Layout::vertical([
-                Constraint::Min(1),
-                Constraint::Length(1),
-                Constraint::Length(3),
-            ]);
-            let [chat_area, help_area, input_area] = vertical.areas(frame.area());
-            let (msg, style) = match input_mode {
-                InputMode::Normal => (
-                    vec![
-                        "Press ".into(),
-                        "q".bold(),
-                        " to exit, ".into(),
-                        "e".bold(),
-                        " to write".into(),
-                    ],
-                    Style::default().add_modifier(Modifier::RAPID_BLINK),
-                ),
-                InputMode::Editing => (
-                    vec![
-                        "Press ".into(),
-                        "Esc".bold(),
-                        " to stop editing, ".into(),
-                        "Enter".bold(),
-                        " to submit the message".into(),
-                    ],
-                    Style::default(),
-                ),
-            };
-            let text = Text::from(Line::from(msg)).patch_style(style);
-            let help_message = Paragraph::new(text);
-            frame.render_widget(help_message, help_area);
+        }
+        let (msg, style) = match input_mode {
+            InputMode::Normal => (
+                vec![
+                    "Press ".into(),
+                    "q".bold(),
+                    " to exit, ".into(),
+                    "Space".bold(),
+                    " to write".into(),
+                ],
+                Style::default().add_modifier(Modifier::RAPID_BLINK),
+            ),
+            InputMode::Editing => (
+                vec![
+                    "Press ".into(),
+                    "Esc".bold(),
+                    " to stop editing, ".into(),
+                    "Enter".bold(),
+                    " to submit the message".into(),
+                ],
+                Style::default(),
+            ),
+        };
+        let text = Text::from(Line::from(msg)).patch_style(style);
+        let help_message = Paragraph::new(text);
+        frame.render_widget(help_message, help_area);
 
-            let input = Paragraph::new(input.as_str())
-                .style(match input_mode {
-                    InputMode::Normal => Style::default(),
-                    InputMode::Editing => Style::default().fg(Color::Yellow),
-                })
-                .block(Block::bordered().title("Input"));
-            frame.render_widget(input, input_area);
-            match input_mode {
-                // Hide the cursor. `Frame` does this by default, so we don't need to do anything here
-                InputMode::Normal => {}
+        let input = Paragraph::new(input.as_str())
+            .style(match input_mode {
+                InputMode::Normal => Style::default(),
+                InputMode::Editing => Style::default().fg(Color::Yellow),
+            })
+            .block(Block::bordered().title("Input"));
+        frame.render_widget(input, input_area);
+        match input_mode {
+            // Hide the cursor. `Frame` does this by default, so we don't need to do anything here
+            InputMode::Normal => {}
 
-                // Make the cursor visible and ask ratatui to put it at the specified coordinates after
-                // rendering
-                #[allow(clippy::cast_possible_truncation)]
-                InputMode::Editing => frame.set_cursor_position(Position::new(
-                    // Draw the cursor at the current position in the input field.
-                    // This position is can be controlled via the left and right arrow key
-                    input_area.x + character_index as u16 + 1,
-                    // Move one line down, from the border to the input line
-                    input_area.y + 1,
-                )),
+            // Make the cursor visible and ask ratatui to put it at the specified coordinates after
+            // rendering
+            #[allow(clippy::cast_possible_truncation)]
+            InputMode::Editing => frame.set_cursor_position(Position::new(
+                // Draw the cursor at the current position in the input field.
+                // This position is can be controlled via the left and right arrow key
+                input_area.x + character_index as u16 + 1,
+                // Move one line down, from the border to the input line
+                input_area.y + 1,
+            )),
+        }
+
+        let messages: Vec<Line> = messages
+            .iter()
+            .map(|m| {
+                let message = &m.0;
+                let style = &m.1;
+                let mut s = Span::raw(format!("{message}"));
+                match style {
+                    TextStyle::Normal => {}
+                    TextStyle::Italic => {
+                        s = s.italic();
+                    }
+                    TextStyle::Bold => {
+                        s = s.bold();
+                    }
+                    TextStyle::Blinking => {
+                        s = s.add_modifier(Modifier::RAPID_BLINK);
+                    }
+                }
+                Line::from(s)
+            })
+            .collect();
+        let messages = Paragraph::new(messages)
+            .block(Block::bordered().title("Commands"))
+            .scroll((
+                state.vertical_position_commands.try_into().unwrap(),
+                state.horizontal_position_chat.try_into().unwrap(),
+            ));
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(Some("↑"))
+            .end_symbol(Some("↓"));
+        frame.render_widget(messages, messages_area);
+        frame.render_stateful_widget(
+            scrollbar,
+            messages_area.inner(Margin {
+                // using an inner vertical margin of 1 unit makes the scrollbar inside the block
+                vertical: 1,
+                horizontal: 0,
+            }),
+            &mut state.scrollstate_commands,
+        );
+    }
+
+    fn draw_commands_chat(frame: &mut Frame, state: &mut AppState) {
+        let messages = &state.messages;
+        let input = &state.input;
+        let input_mode = &state.input_mode;
+        let character_index = state.character_index;
+        let chat_messages = &state.chat_messages;
+        let chatid = &state.chatid;
+        let vertical = Layout::vertical([
+            Constraint::Min(1),
+            Constraint::Length(1),
+            Constraint::Length(3),
+        ]);
+        let [chat_area, help_area, input_area] = vertical.areas(frame.area());
+        let (msg, style) = match input_mode {
+            InputMode::Normal => (
+                vec![
+                    "Press ".into(),
+                    "q".bold(),
+                    " to exit, ".into(),
+                    "e".bold(),
+                    " to write".into(),
+                ],
+                Style::default().add_modifier(Modifier::RAPID_BLINK),
+            ),
+            InputMode::Editing => (
+                vec![
+                    "Press ".into(),
+                    "Esc".bold(),
+                    " to stop editing, ".into(),
+                    "Enter".bold(),
+                    " to submit the message".into(),
+                ],
+                Style::default(),
+            ),
+        };
+        let text = Text::from(Line::from(msg)).patch_style(style);
+        let help_message = Paragraph::new(text);
+        frame.render_widget(help_message, help_area);
+
+        let input = Paragraph::new(input.as_str())
+            .style(match input_mode {
+                InputMode::Normal => Style::default(),
+                InputMode::Editing => Style::default().fg(Color::Yellow),
+            })
+            .block(Block::bordered().title("Input"));
+        frame.render_widget(input, input_area);
+        match input_mode {
+            // Hide the cursor. `Frame` does this by default, so we don't need to do anything here
+            InputMode::Normal => {}
+
+            // Make the cursor visible and ask ratatui to put it at the specified coordinates after
+            // rendering
+            #[allow(clippy::cast_possible_truncation)]
+            InputMode::Editing => frame.set_cursor_position(Position::new(
+                // Draw the cursor at the current position in the input field.
+                // This position is can be controlled via the left and right arrow key
+                input_area.x + character_index as u16 + 1,
+                // Move one line down, from the border to the input line
+                input_area.y + 1,
+            )),
+        }
+
+        let messages: Vec<Line> = chat_messages
+            .iter()
+            .map(|m| Line::from(Span::raw(format!("{m}"))))
+            .collect();
+        let messages = Paragraph::new(messages)
+            .block(Block::bordered().title(format!("{}", chatid)))
+            .scroll((
+                state.vertical_position_chat.try_into().unwrap(),
+                state.horizontal_position_chat.try_into().unwrap(),
+            ));
+
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(Some("↑"))
+            .end_symbol(Some("↓"));
+
+        frame.render_widget(messages, chat_area);
+
+        frame.render_stateful_widget(
+            scrollbar,
+            chat_area.inner(Margin {
+                // using an inner vertical margin of 1 unit makes the scrollbar inside the block
+                vertical: 1,
+                horizontal: 0,
+            }),
+            &mut state.scrollstate_chat,
+        );
+    }
+
+    fn draw(frame: &mut Frame, state: &mut AppState) {
+        match state.app_current_state {
+            AppCurrentState::Commands => {
+                Self::draw_commands_section(frame, state);
             }
-
-            let messages: Vec<Line> = chat_messages
-                .iter()
-                .map(|m| Line::from(Span::raw(format!("{m}"))))
-                .collect();
-            let messages = Paragraph::new(messages)
-                .block(Block::bordered().title(format!("Chat with {}", chatid)))
-                .scroll((
-                    state.vertical_position_chat.try_into().unwrap(),
-                    state.horizontal_position_chat.try_into().unwrap(),
-                ));
-
-            let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-                .begin_symbol(Some("↑"))
-                .end_symbol(Some("↓"));
-
-            frame.render_widget(messages, chat_area);
-
-            frame.render_stateful_widget(
-                scrollbar,
-                chat_area.inner(Margin {
-                    // using an inner vertical margin of 1 unit makes the scrollbar inside the block
-                    vertical: 1,
-                    horizontal: 0,
-                }),
-                &mut state.scrollstate_chat,
-            );
+            AppCurrentState::Chat => {
+                Self::draw_commands_chat(frame, state);
+            }
+            AppCurrentState::Request => {}
         }
     }
 }
