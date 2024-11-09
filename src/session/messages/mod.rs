@@ -54,7 +54,7 @@ pub struct ChatMsg {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ReplayMsg {
-    pub session_id: String,
+    pub key_id: String,
 }
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ReplayResponseMsg {
@@ -312,12 +312,12 @@ impl SessionMessage {
         }
     }
 
-    pub fn new_replay(session_id: String) -> Self {
+    pub fn new_replay(key_id: String) -> Self {
         SessionMessage {
             message: MessageData::Replay(ReplayMsg {
-                session_id: session_id.clone(),
+                key_id: key_id.clone(),
             }),
-            session_id: session_id.clone(),
+            session_id: "".to_string(),
         }
     }
 

@@ -164,6 +164,9 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
         let (tx, rx) = mpsc::channel(100);
         let (tx_chat, rx_chat) = mpsc::channel(100);
         let memory_file = ".memory";
+        if relay {
+            println!("relay session");
+        }
         Session {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             discovered: Arc::new(Mutex::new(HashMap::new())),
@@ -921,6 +924,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
             let replay_topic = Topic::replay_topic(identifier.as_ref());
             topics_to_subscribe.push(email_topic);
             topics_to_subscribe.push(replay_topic);
+            topics_to_subscribe.push(init_topic);
         } else {
             let replay_response_topic = Topic::replay_response_topic(identifier.as_ref());
             topics_to_subscribe.push(init_topic);
@@ -947,23 +951,21 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
 
         // Set up listeners for memory retrieval
         {
+            let key_fingerprint = self.host_encro.lock().await.get_public_key_fingerprint();
+            let replay_response_topic = Topic::replay_response_topic(&key_fingerprint);
+
             let mut memory_topics = Vec::new();
-            for session_id in self.memory.lock().await.get_session_ids() {
-                let replay_topic = Topic::replay_topic(&session_id);
-                memory_topics.push(replay_topic);
-            }
+            memory_topics.push(replay_response_topic);
             self.serve_topics(memory_topics, &tx_clone, false).await;
 
             // Send request for replay
-            for session_id in self.memory.lock().await.get_session_ids() {
-                let replay_request_topic = Topic::replay_topic(&session_id);
-                let message = Message::new_replay(replay_request_topic.clone());
-                let _ = responder
-                    .lock()
-                    .await
-                    .send_message(&replay_request_topic, message)
-                    .await;
-            }
+            let replay_topic = Topic::replay_topic(&key_fingerprint);
+            let message = Message::new_replay(replay_topic.clone());
+            let _ = responder
+                .lock()
+                .await
+                .send_message(&replay_topic, message)
+                .await;
         }
 
         if !self.relay {
@@ -1274,10 +1276,10 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                 if !self.relay {
                     return Ok(None);
                 }
-                if let Some(messages) = relay.get_messages(&msg.session_id) {
-                    let topic = Topic::replay_topic(&session_id);
+                if let Some(messages) = relay.get_messages(&msg.key_id) {
+                    let topic = Topic::replay_topic(&msg.key_id);
                     return Ok(Some((
-                        Message::new_replay_response(session_id, messages),
+                        Message::new_replay_response(msg.key_id, messages),
                         topic,
                     )));
                 }
@@ -1397,6 +1399,9 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                     }
                 }
 
+                if self.relay {
+                    println!("Init msg..");
+                }
                 let signature = msg.signature.clone();
                 let challenge = msg.challenge.clone();
 
@@ -1441,10 +1446,6 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                                 "-- initmsg {} - session id: {}",
                                 pub_encro.get_public_key_fingerprint(),
                                 session_id
-                            );
-                            relay.register_participant(
-                                &pub_encro.get_public_key_fingerprint(),
-                                &session_id.clone(),
                             );
                         }
 
@@ -1570,6 +1571,11 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                 let challenge_sig = msg.challenge_sig.clone();
                 let sym_key_encrypted = msg.sym_key_encrypted.clone();
 
+                if self.relay {
+                    relay.register_participant(&msg.pub_key, &session_id);
+                    relay.register_participant(&msg.orig_pub_key, &session_id);
+                }
+
                 let sym_key = match self.host_encro.lock().await.decrypt(&sym_key_encrypted) {
                     Ok(res) => res,
                     Err(_) => {
@@ -1597,10 +1603,6 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                     }
                     let cert = cert.unwrap();
                     let other_key_fingerprint = cert.fingerprint().to_string();
-
-                    if self.relay {
-                        relay.register_participant(&other_key_fingerprint, &session_id);
-                    }
 
                     for (pending_fingerprint, pending_challenge) in pendings.iter() {
                         let pending_pub_key_fingerprint = pending_fingerprint.clone();
@@ -2047,17 +2049,31 @@ impl SessionRelay {
         self.memory.remove(session_id);
     }
     pub fn register_participant(&mut self, key: &str, session_id: &str) {
-        println!("");
-        match self.keys_to_sessions.get_mut(key) {
-            Some(ids) => {
-                if ids.contains(&session_id.to_string()) {
-                    ids.push(session_id.to_string());
+        let pub_key_decoded = match base64::decode(key) {
+            Err(_) => {
+                return;
+            }
+            Ok(pub_key) => pub_key,
+        };
+        match PGPEnCryptOwned::new_from_vec(&pub_key_decoded) {
+            Ok(pub_encro) => {
+                let key = pub_encro.get_public_key_fingerprint();
+                println!("register participant: {} -> {}", key, session_id);
+                match self.keys_to_sessions.get_mut(&key) {
+                    Some(ids) => {
+                        if ids.contains(&session_id.to_string()) {
+                            ids.push(session_id.to_string());
+                        }
+                    }
+                    None => {
+                        let mut vec = Vec::new();
+                        vec.push(session_id.to_string());
+                        self.keys_to_sessions.insert(key.to_string(), vec);
+                    }
                 }
             }
-            None => {
-                let mut vec = Vec::new();
-                vec.push(session_id.to_string());
-                self.keys_to_sessions.insert(key.to_string(), vec);
+            Err(_) => {
+                return;
             }
         }
     }
