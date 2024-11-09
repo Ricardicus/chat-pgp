@@ -28,8 +28,8 @@ use messages::MessageData::{
 use messages::MessagingError::*;
 use messages::SessionMessage as Message;
 use messages::{
-    ChatMsg, EmailMsg, EncryptedMsg, MessageData, MessageListener, MessagebleTopicAsync,
-    MessagebleTopicAsyncPublishReads, MessagebleTopicAsyncReadTimeout, MessagingError, ReplayMsg,
+    ChatMsg, EncryptedMsg, MessageData, MessageListener, MessagebleTopicAsync,
+    MessagebleTopicAsyncPublishReads, MessagebleTopicAsyncReadTimeout, MessagingError,
     SessionErrorCodes, SessionErrorMsg,
 };
 use middleware::ZenohHandler;

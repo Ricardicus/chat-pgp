@@ -497,7 +497,7 @@ async fn terminate(session_tx: mpsc::Sender<(String, String)>) {
 async fn terminal_program(
     session_tx: mpsc::Sender<(String, String)>,
     cert: Arc<Cert>,
-    mut session: Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt>,
+    session: Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt>,
 ) {
 }
 
