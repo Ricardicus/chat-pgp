@@ -235,9 +235,9 @@ impl InputCommand {
         }
     }
 
-    async fn print_help() {
+    async fn print_help(nbr_emails: u64) {
         let _help_text = String::new();
-        println_message_str(1, "Available commands:").await;
+        println_message_str(1, "Available commands :) :").await;
         println_message_str(1, "  list").await;
         println_message_str(1, "  - List and enumerate all discovered peers.").await;
         println_message_str(1, "  init [entry]").await;
@@ -252,6 +252,11 @@ impl InputCommand {
         println_message_str(1, "  - Delete the record of a previous chat session").await;
         println_message_str(1, "    enumerated as per 'remind'.").await;
         println_message_str(1, "  email [entry]").await;
+        println_message_str(
+            1,
+            &format!(" There has been {} emails received since start", nbr_emails),
+        )
+        .await;
         println_message_str(
             1,
             "  - Send an email to someone encrypted as per a previous session",
@@ -745,7 +750,7 @@ async fn launch_terminal_program(
                     }
                     Some(InputCommand::Help(_)) => {
                         // Print help
-                        InputCommand::print_help().await;
+                        InputCommand::print_help(session.get_nbr_emails().await).await;
                     }
                     Some(InputCommand::Remind(_)) => {
                         let ids = session.get_reminded_session_ids().await;
@@ -1012,7 +1017,7 @@ async fn launch_terminal_program(
                                 }
                             }
                         } else {
-                            InputCommand::print_help().await;
+                            InputCommand::print_help(session.get_nbr_emails().await).await;
                         }
                     }
                 }

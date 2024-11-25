@@ -321,6 +321,16 @@ impl SessionMessage {
         }
     }
 
+    pub fn new_email(session_id: String, encrypted_msg: EncryptedMsg) -> Self {
+        SessionMessage {
+            message: MessageData::Email(EmailMsg {
+                message: encrypted_msg,
+                session_id,
+            }),
+            session_id: "".into(),
+        }
+    }
+
     pub fn new_replay_response(session_id: String, messages: Vec<SessionMessage>) -> Self {
         SessionMessage {
             message: MessageData::ReplayResponse(ReplayResponseMsg {
