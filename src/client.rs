@@ -237,20 +237,20 @@ impl InputCommand {
 
     async fn print_help(nbr_emails: u64) {
         let _help_text = String::new();
-        println_message_str(1, "Available commands :) :").await;
+        println_message_str(1, "Available commands:").await;
         println_message_str(1, "  list").await;
-        println_message_str(1, "  - List and enumerate all discovered peers.").await;
+        println_message_str(1, "    - List and enumerate all discovered peers.").await;
         println_message_str(1, "  init [entry]").await;
-        println_message_str(1, "  - Initialize a chat session with a peer").await;
-        println_message_str(1, "    enumerated as per 'list'").await;
+        println_message_str(1, "    - Initialize a chat session with a peer").await;
+        println_message_str(1, "      enumerated as per 'list'").await;
         println_message_str(1, "  remind").await;
-        println_message_str(1, "  - List and enumerate encrypted and stored sessions.").await;
+        println_message_str(1, "    - List and enumerate encrypted and stored sessions.").await;
         println_message_str(1, "  rewind [entry]").await;
-        println_message_str(1, "  - Decrypts and displays previous chat sessions").await;
-        println_message_str(1, "    enumerated as per 'remind'.").await;
+        println_message_str(1, "    - Decrypts and displays previous chat sessions").await;
+        println_message_str(1, "      enumerated as per 'remind'.").await;
         println_message_str(1, "  forget [entry]").await;
-        println_message_str(1, "  - Delete the record of a previous chat session").await;
-        println_message_str(1, "    enumerated as per 'remind'.").await;
+        println_message_str(1, "    - Delete the record of a previous chat session").await;
+        println_message_str(1, "      enumerated as per 'remind'.").await;
         println_message_str(1, "  inbox").await;
         println_message_str(1, "  email [entry]").await;
         println_message_str(
