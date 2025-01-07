@@ -1,3 +1,4 @@
+use crate::session::crypto::sha256sum;
 use crate::session::protocol::challenge_len;
 use crate::util::{generate_random_string, get_current_datetime};
 use serde::{Deserialize, Serialize};
@@ -9,12 +10,14 @@ pub enum EncryptionType {
     Assymetric,
     Symmetric,
 }
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct InitMsg {
     pub pub_key: String,
     pub signature: String,
     pub challenge: String,
 }
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct InitOkMsg {
     pub sym_key_encrypted: String,
@@ -22,16 +25,19 @@ pub struct InitOkMsg {
     pub orig_pub_key: String,
     pub challenge_sig: String,
 }
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct InitAwaitMsg {
     pub pub_key: String,
     pub orig_pub_key: String,
 }
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct InitDeclineMsg {
     pub pub_key: String,
     pub message: String,
 }
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct KeyPassMsg {
     pub sym_key: String,
@@ -56,6 +62,7 @@ pub struct ChatMsg {
 pub struct ReplayMsg {
     pub key_id: String,
 }
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ReplayResponseMsg {
     pub session_id: String,
@@ -84,7 +91,20 @@ pub struct EncryptedMsg {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct EmailMsg {
     pub session_id: String,
+    pub sender: String,
     pub message: EncryptedMsg,
+    pub date_time: String,
+}
+
+impl EmailMsg {
+    pub fn get_id(&self) -> String {
+        let mut s = String::new();
+        s.push_str(&self.session_id);
+        s.push_str(&self.sender);
+        s.push_str(&self.message.data);
+        s.push_str(&self.date_time);
+        s
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -321,11 +341,13 @@ impl SessionMessage {
         }
     }
 
-    pub fn new_email(session_id: String, encrypted_msg: EncryptedMsg) -> Self {
+    pub fn new_email(session_id: String, sender: String, encrypted_msg: EncryptedMsg) -> Self {
         SessionMessage {
             message: MessageData::Email(EmailMsg {
                 message: encrypted_msg,
+                sender,
                 session_id,
+                date_time: get_current_datetime(),
             }),
             session_id: "".into(),
         }

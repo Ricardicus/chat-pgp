@@ -7,6 +7,7 @@ use tokio::sync::{mpsc, Mutex};
 use tokio::time::{timeout, Duration};
 
 pub mod crypto;
+pub mod inbox;
 pub mod memory;
 pub mod messages;
 pub mod middleware;
@@ -20,6 +21,7 @@ use crypto::{
     CrypticalID, CrypticalSign, CrypticalVerify, PGPEnCryptOwned, PGPEnDeCrypt,
 };
 use futures::prelude::*;
+use inbox::Inbox;
 use memory::{Memory, SessionLogMessage};
 use messages::MessageData::{
     Chat, Close, Discovery, DiscoveryReply, Email, Encrypted, Heartbeat, Init, InitAwait,
@@ -152,6 +154,7 @@ where
     relay: bool,
     memory: Arc<Mutex<Memory>>,
     memory_active: bool,
+    inbox: Arc<Mutex<Inbox>>,
     running: Arc<Mutex<bool>>,
 }
 
@@ -166,6 +169,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
         let (tx_chat, rx_chat) = mpsc::channel(100);
         let fingerprint = host_encro.get_public_key_fingerprint();
         let memory_file = &format!(".memory_{}", fingerprint);
+        let inbox_file = &format!(".inbox_{}", fingerprint);
         if relay {
             println!("relay session");
         }
@@ -199,6 +203,9 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                 Memory::from_file(memory_file).unwrap_or_else(|_| Memory::new(&memory_file)),
             )),
             memory_active,
+            inbox: Arc::new(Mutex::new(
+                Inbox::from_file(inbox_file).unwrap_or_else(|_| Inbox::new(&inbox_file)),
+            )),
             added_emails: Arc::new(Mutex::new(0)),
             running: Arc::new(Mutex::new(true)),
         }
@@ -233,6 +240,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
             added_emails: self.added_emails.clone(),
             memory: self.memory.clone(),
             memory_active: self.memory_active,
+            inbox: self.inbox.clone(),
             running: self.running.clone(),
         }
     }
@@ -1783,7 +1791,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                 }
             }
             Email(msg) => {
-                let session_id = msg.session_id;
+                let session_id = msg.session_id.clone();
                 if self.relay {
                     println!("Received email from session {}", session_id);
                     let msg = Message {
@@ -1800,7 +1808,9 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                     }
                 } else {
                     // Store this in memory if it exists
-                    if self.memory.lock().await.in_memory(&session_id) {}
+                    if self.memory.lock().await.in_memory(&session_id) {
+                        self.inbox.lock().await.add_entry(msg.clone());
+                    }
                 }
                 Ok(None)
             }
@@ -1971,7 +1981,8 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                 let msg_enc = EncryptedMsg {
                     data: msg_encrypted,
                 };
-                let msg = Message::new_email(session_id.to_string(), msg_enc);
+                let sender = self.get_userid().await;
+                let msg = Message::new_email(session_id.to_string(), sender, msg_enc);
 
                 match gateway.send_message(&topic, msg).await {
                     Ok(_) => {}
