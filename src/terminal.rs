@@ -199,7 +199,7 @@ struct AppState {
     pub request_text: String,
     pub character_index: usize,
     pub character_indexy: usize,
-    pub messages: Vec<(String, TextStyle)>,
+    pub messages: Vec<Vec<PrintCommand>>,
     pub chat_messages: Vec<String>,
     pub chatid: String,
     pub vertical_position_chat: usize,
@@ -296,7 +296,24 @@ impl App {
         let index = self.byte_index().await;
         {
             let mut state = self.state.lock().await;
-            state.input.insert(index, new_char);
+            let indexy = state.character_indexy;
+            if indexy == 0 {
+                state.input.insert(index, new_char);
+            } else {
+                let mut lines: Vec<String> = state.input.lines().map(String::from).collect();
+                while lines.len() <= indexy {
+                    lines.push("".into());
+                }
+                if let Some(line) = lines.get_mut(indexy) {
+                    // Insert the character at the given index in the specified line
+                    while line.len() <= index {
+                        line.push(' ');
+                    }
+                    line.insert(index, new_char);
+                }
+                // Reconstruct state.input
+                state.input = lines.join("\n");
+            }
         }
         if new_char == '\n' {
             self.move_cursor_down().await;
@@ -328,30 +345,62 @@ impl App {
             {
                 is_not_cursor_leftmost = state.character_index != 0
             };
+            let indexy = state.character_indexy;
+            let index = state.character_index;
             if is_not_cursor_leftmost {
-                let current_index;
-                {
-                    current_index = state.character_index;
+                let mut lines: Vec<String> = state.input.lines().map(String::from).collect();
+                while lines.len() <= indexy {
+                    lines.push("".into());
                 }
-                let from_left_to_current_index = current_index - 1;
-                let input;
-                {
-                    input = state.input.clone();
+                if let Some(line) = lines.get_mut(indexy) {
+                    // Insert the character at the given index in the specified line
+                    while line.len() < index {
+                        line.push(' ');
+                    }
                 }
-                len = Some(input.len());
-                let before_char_to_delete = input.chars().take(from_left_to_current_index);
-                let after_char_to_delete = input.chars().skip(current_index);
+                // Reconstruct state.input
+                state.input = lines.join("\n");
 
-                {
-                    state.input = before_char_to_delete.chain(after_char_to_delete).collect();
+                let mut lines: Vec<String> = state.input.lines().map(String::from).collect();
+                while lines.len() <= indexy {
+                    lines.push("".into());
                 }
+                if let Some(mut line) = lines.get_mut(indexy) {
+                    let current_index;
+                    {
+                        current_index = state.character_index;
+                    }
+                    let from_left_to_current_index = current_index - 1;
+                    let input: String = line.clone();
+                    len = Some(input.len());
+                    let before_char_to_delete = input.chars().take(from_left_to_current_index);
+                    let after_char_to_delete = input.chars().skip(current_index);
+                    line.clear();
+                    line.push_str(
+                        &before_char_to_delete
+                            .chain(after_char_to_delete)
+                            .collect::<String>(),
+                    );
+                }
+                // Reconstruct state.input
+                state.input = lines.join("\n");
+            } else {
+                let mut lines: Vec<String> = state.input.lines().map(String::from).collect();
+                while lines.len() <= indexy {
+                    lines.push("".into());
+                }
+                if lines[indexy].len() == 0 {
+                    lines.remove(indexy);
+                }
+                // Reconstruct state.input
+                state.input = lines.join("\n");
             }
         }
         if len.is_some() {
             self.move_cursor_left(len.unwrap()).await;
         }
     }
-    //self.input.lock().await.chars().count()
+
     async fn clamp_cursor(&self, new_cursor_pos: usize, len: usize) -> usize {
         new_cursor_pos.clamp(0, len)
     }
@@ -412,32 +461,49 @@ impl App {
     }
     async fn move_vertical_scroll_down(&mut self) {
         let mut state = self.state.lock().await;
-        if state.chat_messages.len() > 0 {
-            state.vertical_position_chat = state.vertical_position_chat.saturating_add(1);
-            state.scrollstate_chat = state
-                .scrollstate_chat
-                .position(state.vertical_position_chat);
-        } else {
-            state.vertical_position_commands = state.vertical_position_commands.saturating_add(1);
-            state.scrollstate_commands = state
-                .scrollstate_commands
-                .position(state.vertical_position_chat);
+        match state.app_current_state {
+            AppCurrentState::Commands => {
+                state.vertical_position_commands =
+                    state.vertical_position_commands.saturating_add(1);
+                state.scrollstate_commands = state
+                    .scrollstate_commands
+                    .position(state.vertical_position_chat);
+            }
+            AppCurrentState::Chat => {
+                state.vertical_position_chat = state.vertical_position_chat.saturating_add(1);
+                state.scrollstate_chat = state
+                    .scrollstate_chat
+                    .position(state.vertical_position_chat);
+            }
+            AppCurrentState::Request => {
+                state.character_indexy = state.character_indexy.saturating_add(1);
+            }
         }
     }
+
     async fn move_vertical_scroll_up(&mut self) {
         let mut state = self.state.lock().await;
-        if state.chat_messages.len() > 0 {
-            state.vertical_position_chat = state.vertical_position_chat.saturating_sub(1);
-            state.scrollstate_chat = state
-                .scrollstate_chat
-                .position(state.vertical_position_chat);
-        } else {
-            state.vertical_position_commands = state.vertical_position_commands.saturating_sub(1);
-            state.scrollstate_commands = state
-                .scrollstate_commands
-                .position(state.vertical_position_chat);
+
+        match state.app_current_state {
+            AppCurrentState::Commands => {
+                state.vertical_position_commands =
+                    state.vertical_position_commands.saturating_sub(1);
+                state.scrollstate_commands = state
+                    .scrollstate_commands
+                    .position(state.vertical_position_chat);
+            }
+            AppCurrentState::Chat => {
+                state.vertical_position_chat = state.vertical_position_chat.saturating_sub(1);
+                state.scrollstate_chat = state
+                    .scrollstate_chat
+                    .position(state.vertical_position_chat);
+            }
+            AppCurrentState::Request => {
+                state.character_indexy = state.character_indexy.saturating_sub(1);
+            }
         }
     }
+
     async fn move_horizontal_scroll_left(&mut self) {
         let mut state = self.state.lock().await;
         if state.chat_messages.len() > 0 {
@@ -462,7 +528,14 @@ impl App {
     }
     async fn write_new_message(&mut self, message: String, style: TextStyle) {
         let mut state = self.state.lock().await;
-        state.messages.push((message, style));
+        let cmd = PrintCommand {
+            window: 0,
+            message,
+            style,
+        };
+        let mut v = Vec::new();
+        v.push(cmd);
+        state.messages.push(v);
         state.scrollstate_commands = state
             .scrollstate_commands
             .content_length(state.messages.len());
@@ -496,14 +569,20 @@ impl App {
     }
     async fn set_last_message(&mut self, _window: usize, message: String, style: TextStyle) {
         let mut state = self.state.lock().await;
+        let cmd = PrintCommand {
+            window: 0,
+            message: message.clone(),
+            style: style,
+        };
         if state.messages.len() > 0 {
             if let Some(last) = state.messages.last_mut() {
-                // Append the string `s1` to the String part of the last element
-                last.0.push_str(&message);
-                last.1 = style;
+                last.clear();
+                last.push(cmd);
             }
         } else {
-            state.messages.push((message, style));
+            let mut v = Vec::new();
+            v.push(cmd);
+            state.messages.push(v);
         }
     }
 
@@ -511,7 +590,7 @@ impl App {
         let pipe = pipe.clone();
         let mut app = self.clone();
 
-        //app.set_app_state(AppCurrentState::Request).await;
+        // app.set_app_state(AppCurrentState::Request).await;
 
         // First task to initialize the global value
         let initializer = tokio::spawn(async {
@@ -822,22 +901,28 @@ impl App {
         let messages: Vec<Line> = messages
             .iter()
             .map(|m| {
-                let message = &m.0;
-                let style = &m.1;
-                let mut s = Span::raw(format!("{message}"));
-                match style {
-                    TextStyle::Normal => {}
-                    TextStyle::Italic => {
-                        s = s.italic();
-                    }
-                    TextStyle::Bold => {
-                        s = s.bold();
-                    }
-                    TextStyle::Blinking => {
-                        s = s.add_modifier(Modifier::RAPID_BLINK);
-                    }
-                }
-                Line::from(s)
+                Line::from(
+                    m.iter()
+                        .map(|msg| {
+                            let message = &msg.message;
+                            let style = &msg.style;
+                            let mut s = Span::raw(format!("{message}"));
+                            match style {
+                                TextStyle::Normal => {}
+                                TextStyle::Italic => {
+                                    s = s.italic();
+                                }
+                                TextStyle::Bold => {
+                                    s = s.bold();
+                                }
+                                TextStyle::Blinking => {
+                                    s = s.add_modifier(Modifier::RAPID_BLINK);
+                                }
+                            }
+                            s
+                        })
+                        .collect::<Vec<Span>>(),
+                )
             })
             .collect();
         let messages = Paragraph::new(messages)
