@@ -199,7 +199,7 @@ struct AppState {
     pub request_text: String,
     pub character_index: usize,
     pub character_indexy: usize,
-    pub messages: Vec<(String, TextStyle)>,
+    pub messages: Vec<Vec<PrintCommand>>,
     pub chat_messages: Vec<String>,
     pub chatid: String,
     pub vertical_position_chat: usize,
@@ -400,7 +400,7 @@ impl App {
             self.move_cursor_left(len.unwrap()).await;
         }
     }
-    //self.input.lock().await.chars().count()
+
     async fn clamp_cursor(&self, new_cursor_pos: usize, len: usize) -> usize {
         new_cursor_pos.clamp(0, len)
     }
@@ -528,7 +528,14 @@ impl App {
     }
     async fn write_new_message(&mut self, message: String, style: TextStyle) {
         let mut state = self.state.lock().await;
-        state.messages.push((message, style));
+        let cmd = PrintCommand {
+            window: 0,
+            message,
+            style,
+        };
+        let mut v = Vec::new();
+        v.push(cmd);
+        state.messages.push(v);
         state.scrollstate_commands = state
             .scrollstate_commands
             .content_length(state.messages.len());
@@ -562,14 +569,20 @@ impl App {
     }
     async fn set_last_message(&mut self, _window: usize, message: String, style: TextStyle) {
         let mut state = self.state.lock().await;
+        let cmd = PrintCommand {
+            window: 0,
+            message: message.clone(),
+            style: style,
+        };
         if state.messages.len() > 0 {
             if let Some(last) = state.messages.last_mut() {
-                // Append the string `s1` to the String part of the last element
-                last.0.push_str(&message);
-                last.1 = style;
+                last.clear();
+                last.push(cmd);
             }
         } else {
-            state.messages.push((message, style));
+            let mut v = Vec::new();
+            v.push(cmd);
+            state.messages.push(v);
         }
     }
 
@@ -577,7 +590,7 @@ impl App {
         let pipe = pipe.clone();
         let mut app = self.clone();
 
-        app.set_app_state(AppCurrentState::Request).await;
+        // app.set_app_state(AppCurrentState::Request).await;
 
         // First task to initialize the global value
         let initializer = tokio::spawn(async {
@@ -888,22 +901,28 @@ impl App {
         let messages: Vec<Line> = messages
             .iter()
             .map(|m| {
-                let message = &m.0;
-                let style = &m.1;
-                let mut s = Span::raw(format!("{message}"));
-                match style {
-                    TextStyle::Normal => {}
-                    TextStyle::Italic => {
-                        s = s.italic();
-                    }
-                    TextStyle::Bold => {
-                        s = s.bold();
-                    }
-                    TextStyle::Blinking => {
-                        s = s.add_modifier(Modifier::RAPID_BLINK);
-                    }
-                }
-                Line::from(s)
+                Line::from(
+                    m.iter()
+                        .map(|msg| {
+                            let message = &msg.message;
+                            let style = &msg.style;
+                            let mut s = Span::raw(format!("{message}"));
+                            match style {
+                                TextStyle::Normal => {}
+                                TextStyle::Italic => {
+                                    s = s.italic();
+                                }
+                                TextStyle::Bold => {
+                                    s = s.bold();
+                                }
+                                TextStyle::Blinking => {
+                                    s = s.add_modifier(Modifier::RAPID_BLINK);
+                                }
+                            }
+                            s
+                        })
+                        .collect::<Vec<Span>>(),
+                )
             })
             .collect();
         let messages = Paragraph::new(messages)

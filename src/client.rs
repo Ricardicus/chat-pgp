@@ -546,11 +546,15 @@ async fn launch_terminal_program(
     for uid in cert.userids() {
         userid.push_str(&uid.userid().to_string());
     }
-    let mut upper_prompt = format!("-- Using key {} {}", &cert.fingerprint(), userid);
-    upper_prompt.push_str("\n");
-    upper_prompt.push_str(&InputCommand::get_small_help());
     // Serve incoming commands
-    InputCommand::print_small_help().await;
+    println_message_style(1, format!("Welcome to Chat-PGP"), TextStyle::Bold).await;
+    println_message(1, format!("Using key {} {}", &cert.fingerprint(), userid)).await;
+    println_message_style(
+        1,
+        format!("type 'help' for further guidance"),
+        TextStyle::Italic,
+    )
+    .await;
     let mut keep_running = true;
     while keep_running {
         let pending = session.get_pending_request().await;

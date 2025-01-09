@@ -1204,7 +1204,14 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
     }
 
     pub async fn get_nbr_emails(&self) -> u64 {
-        return *self.added_emails.lock().await;
+        return self
+            .inbox
+            .lock()
+            .await
+            .get_entries()
+            .len()
+            .try_into()
+            .unwrap();
     }
 
     pub async fn get_pub_key_from_session_id(&self, session_id: &str) -> Result<String, String> {
