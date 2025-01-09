@@ -36,7 +36,7 @@ use ncurses::*;
 mod terminal;
 use terminal::{
     format_chat_msg, format_chat_msg_fmt, AppCurrentState, ChatClosedCommand, PrintChatCommand,
-    PrintCommand, SetAppStateCommand, SetChatMessagesCommand, TextStyle, WindowCommand,
+    PrintCommand, SetAppStateCommand, SetChatMessagesCommand, TextColor, TextStyle, WindowCommand,
     WindowManager, WindowPipe,
 };
 
@@ -79,16 +79,29 @@ async fn println_message(window: usize, message: String) {
             window,
             message,
             style: TextStyle::Normal,
+            color: TextColor::white,
         }))
         .await;
 }
-async fn println_message_style(window: usize, message: String, style: TextStyle) {
+async fn println_message_style(window: usize, message: String, style: TextStyle, color: TextColor) {
     PIPE.get()
         .unwrap()
         .send(WindowCommand::Println(PrintCommand {
             window,
             message,
             style,
+            color,
+        }))
+        .await;
+}
+async fn printf_message_style(window: usize, message: String, style: TextStyle, color: TextColor) {
+    PIPE.get()
+        .unwrap()
+        .send(WindowCommand::Print(PrintCommand {
+            window,
+            message,
+            style,
+            color,
         }))
         .await;
 }
@@ -130,6 +143,7 @@ async fn print_message(window: usize, message: String) {
             window,
             message,
             style: TextStyle::Normal,
+            color: TextColor::white,
         }))
         .await;
 }
@@ -237,7 +251,7 @@ impl InputCommand {
 
     async fn print_help(nbr_emails: u64) {
         let _help_text = String::new();
-        println_message_str(1, "Available commands:").await;
+        println_message_style(1, "Available commands:".into(), TextStyle::Bold, TextColor::white).await;
         println_message_str(1, "  list").await;
         println_message_str(1, "    - List and enumerate all discovered peers.").await;
         println_message_str(1, "  init [entry]").await;
@@ -299,7 +313,7 @@ impl InputCommand {
         prompt: &str,
         rx: &mut mpsc::Receiver<Option<WindowCommand>>,
     ) -> Result<String, ()> {
-        println_message_style(1, prompt.to_string(), TextStyle::Bold).await;
+        println_message_style(1, prompt.to_string(), TextStyle::Bold, TextColor::green).await;
         let input = rx.recv().await;
         if input.is_some() {
             let input = input.unwrap();
@@ -547,12 +561,13 @@ async fn launch_terminal_program(
         userid.push_str(&uid.userid().to_string());
     }
     // Serve incoming commands
-    println_message_style(1, format!("Welcome to Chat-PGP"), TextStyle::Bold).await;
-    println_message(1, format!("Using key {} {}", &cert.fingerprint(), userid)).await;
+    println_message_style(1, format!("Welcome to Chat-PGP"), TextStyle::Bold, TextColor::green).await;
+    println_message_style(1, format!("Using key {} {}", &cert.fingerprint(), userid), TextStyle::Normal, TextColor::gray).await;
     println_message_style(
         1,
         format!("type 'help' for further guidance"),
         TextStyle::Italic,
+        TextColor::gray,
     )
     .await;
     let mut keep_running = true;
@@ -873,6 +888,7 @@ async fn launch_terminal_program(
                                                                         msg.message
                                                                     ),
                                                                     TextStyle::Bold,
+                                                                    TextColor::white
                                                                 )
                                                                 .await;
                                                             } else {
@@ -955,6 +971,7 @@ async fn launch_terminal_program(
                                         1,
                                         "Failed to send the email".to_string(),
                                         TextStyle::Bold,
+                                        TextColor::red
                                     )
                                     .await;
                                 } else {
@@ -962,6 +979,7 @@ async fn launch_terminal_program(
                                         1,
                                         "Email sent".to_string(),
                                         TextStyle::Bold,
+                                        TextColor::green
                                     )
                                     .await;
                                 }

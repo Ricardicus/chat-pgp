@@ -32,6 +32,7 @@ pub struct PrintCommand {
     pub window: usize,
     pub message: String,
     pub style: TextStyle,
+    pub color: TextColor,
 }
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ChatClosedCommand {
@@ -190,6 +191,24 @@ pub enum TextStyle {
     Bold,
     Normal,
     Blinking,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub enum TextColor {
+    white,
+    green,
+    blue,
+    red,
+    gray,
+    yellow,
+    magenta,
+    black,
+    lightred,
+    lightgreen,
+    lightyellow,
+    lightblue,
+    lightmagenta,
+    lightcyan,
 }
 
 #[derive(Clone)]
@@ -425,6 +444,7 @@ impl App {
                 window: 1,
                 message: input,
                 style: TextStyle::Normal,
+                color: TextColor::white,
             })))
             .await;
     }
@@ -526,12 +546,22 @@ impl App {
                 state.horizontal_position_commands.saturating_add(1);
         }
     }
-    async fn write_new_message(&mut self, message: String, style: TextStyle) {
+    async fn write_new_message(&mut self, cmd: PrintCommand) {
+        let mut state = self.state.lock().await;
+        let mut v = Vec::new();
+        v.push(cmd);
+        state.messages.push(v);
+        state.scrollstate_commands = state
+            .scrollstate_commands
+            .content_length(state.messages.len());
+    }
+    async fn write_new_message_raw(&mut self, message: String, style: TextStyle) {
         let mut state = self.state.lock().await;
         let cmd = PrintCommand {
             window: 0,
             message,
             style,
+            color: TextColor::white,
         };
         let mut v = Vec::new();
         v.push(cmd);
@@ -567,12 +597,13 @@ impl App {
             .scrollstate_chat
             .content_length(state.chat_messages.len());
     }
-    async fn set_last_message(&mut self, _window: usize, message: String, style: TextStyle) {
+    async fn set_last_message_raw(&mut self, _window: usize, message: String, style: TextStyle) {
         let mut state = self.state.lock().await;
         let cmd = PrintCommand {
             window: 0,
             message: message.clone(),
             style: style,
+            color: TextColor::white,
         };
         if state.messages.len() > 0 {
             if let Some(last) = state.messages.last_mut() {
@@ -585,8 +616,25 @@ impl App {
             state.messages.push(v);
         }
     }
+    async fn set_last_message(&mut self, cmd: PrintCommand) {
+        let mut state = self.state.lock().await;
+        if state.messages.len() > 0 {
+            if let Some(last) = state.messages.last_mut() {
+                last.clear();
+                last.push(cmd);
+            }
+        } else {
+            let mut v = Vec::new();
+            v.push(cmd);
+            state.messages.push(v);
+        }
+    }
 
-    async fn run(&mut self, mut terminal: DefaultTerminal, pipe: &WindowPipe<WindowCommand>) {
+    async fn run(
+        &mut self,
+        mut terminal: DefaultTerminal,
+        pipe: &WindowPipe<WindowCommand>,
+    ) {
         let pipe = pipe.clone();
         let mut app = self.clone();
 
@@ -610,14 +658,14 @@ impl App {
                 match timeout(timeout_duration, pipe.read()).await {
                     Ok(Ok(command)) => match command {
                         WindowCommand::Print(cmd) => {
-                            app.set_last_message(cmd.window, cmd.message, cmd.style)
+                            app.set_last_message(cmd)
                                 .await;
                         }
                         WindowCommand::Println(cmd) => {
-                            app.write_new_message(cmd.message, cmd.style).await;
+                            app.write_new_message(cmd).await;
                         }
                         WindowCommand::ChatClosed(cmd) => {
-                            app.write_new_message(cmd.message, TextStyle::Bold).await;
+                            app.write_new_message_raw(cmd.message, TextStyle::Bold).await;
                             app.set_app_state(AppCurrentState::Commands).await;
                         }
                         WindowCommand::PrintChat(cmd) => {
@@ -716,7 +764,7 @@ impl App {
 
                                 if !app.is_in_chat_mode().await {
                                 } else {
-                                    app.write_new_message(
+                                    app.write_new_message_raw(
                                         "Closed the session".to_string(),
                                         TextStyle::Bold,
                                     )
@@ -906,6 +954,7 @@ impl App {
                         .map(|msg| {
                             let message = &msg.message;
                             let style = &msg.style;
+                            let color = &msg.color;
                             let mut s = Span::raw(format!("{message}"));
                             match style {
                                 TextStyle::Normal => {}
@@ -919,6 +968,23 @@ impl App {
                                     s = s.add_modifier(Modifier::RAPID_BLINK);
                                 }
                             }
+
+                            match color {
+                                TextColor::white => s = s.white(),
+                                TextColor::green => s = s.green(),
+                                TextColor::blue => s = s.blue(),
+                                TextColor::red => s = s.red(),
+                                TextColor::gray => s = s.gray(),
+                                TextColor::yellow => s = s.yellow(),
+                                TextColor::magenta => s = s.magenta(),
+                                TextColor::black => s = s.black(),
+                                TextColor::lightred => s = s.light_red(),
+                                TextColor::lightgreen => s = s.light_green(),
+                                TextColor::lightyellow => s = s.light_yellow(),
+                                TextColor::lightblue => s = s.light_blue(),
+                                TextColor::lightmagenta => s = s.light_magenta(),
+                                TextColor::lightcyan => s = s.light_cyan(),
+                            };
                             s
                         })
                         .collect::<Vec<Span>>(),
