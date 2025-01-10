@@ -1,4 +1,3 @@
-use crate::session::crypto::sha256sum;
 use crate::session::protocol::challenge_len;
 use crate::util::{generate_random_string, get_current_datetime};
 use serde::{Deserialize, Serialize};

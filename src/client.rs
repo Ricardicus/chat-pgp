@@ -35,9 +35,9 @@ use ncurses::*;
 
 mod terminal;
 use terminal::{
-    format_chat_msg, format_chat_msg_fmt, AppCurrentState, ChatClosedCommand, PrintChatCommand,
-    PrintCommand, SetAppStateCommand, SetChatMessagesCommand, TextColor, TextStyle, WindowCommand,
-    WindowManager, WindowPipe,
+    format_chat_msg, AppCurrentState, ChatClosedCommand, PrintChatCommand, PrintCommand,
+    SetAppStateCommand, SetChatMessagesCommand, TextColor, TextStyle, WindowCommand, WindowManager,
+    WindowPipe,
 };
 
 #[derive(Parser)]
@@ -79,7 +79,7 @@ async fn println_message(window: usize, message: String) {
             window,
             message,
             style: TextStyle::Normal,
-            color: TextColor::white,
+            color: TextColor::White,
         }))
         .await;
 }
@@ -127,12 +127,13 @@ async fn set_app_state(state: AppCurrentState) {
         }))
         .await;
 }
-async fn println_chat_message(chatid: String, message: String) {
+async fn println_chat_message(message: String, chatid: String, date_time: String) {
     PIPE.get()
         .unwrap()
         .send(WindowCommand::PrintChat(PrintChatCommand {
             chatid,
             message,
+            date_time,
         }))
         .await;
 }
@@ -143,7 +144,7 @@ async fn print_message(window: usize, message: String) {
             window,
             message,
             style: TextStyle::Normal,
-            color: TextColor::white,
+            color: TextColor::White,
         }))
         .await;
 }
@@ -251,7 +252,13 @@ impl InputCommand {
 
     async fn print_help(nbr_emails: u64) {
         let _help_text = String::new();
-        println_message_style(1, "Available commands:".into(), TextStyle::Bold, TextColor::white).await;
+        println_message_style(
+            1,
+            "Available commands:".into(),
+            TextStyle::Bold,
+            TextColor::White,
+        )
+        .await;
         println_message_str(1, "  list").await;
         println_message_str(1, "    - List and enumerate all discovered peers.").await;
         println_message_str(1, "  init [entry]").await;
@@ -313,7 +320,7 @@ impl InputCommand {
         prompt: &str,
         rx: &mut mpsc::Receiver<Option<WindowCommand>>,
     ) -> Result<String, ()> {
-        println_message_style(1, prompt.to_string(), TextStyle::Bold, TextColor::green).await;
+        println_message_style(1, prompt.to_string(), TextStyle::Bold, TextColor::Green).await;
         let input = rx.recv().await;
         if input.is_some() {
             let input = input.unwrap();
@@ -339,11 +346,12 @@ async fn cb_chat(public_key: String, message: String) {
     };
     match PGPEnCryptOwned::new_from_vec(&pub_key_decoded) {
         Ok(pub_encro) => {
-            let (mut chat_id, chat_view) = format_chat_msg(&message, &pub_encro);
-            let fingerprint = short_fingerprint(&pub_encro.get_public_key_fingerprint());
-            chat_id.push_str(" ");
-            chat_id.push_str(&fingerprint);
-            println_chat_message(chat_id, chat_view).await;
+            let date_time = get_current_datetime();
+            let (message, mut userid, fingerprint) = format_chat_msg(&message, &pub_encro);
+            let fingerprint = short_fingerprint(&fingerprint);
+            userid.push_str(" ");
+            userid.push_str(&fingerprint);
+            println_chat_message(message, userid, date_time).await;
         }
         _ => {}
     }
@@ -480,6 +488,13 @@ async fn cb_init_accepted(_public_key: String) {
         format!("-- Peer accepted the connection. You can now chat!"),
     )
     .await;
+    println_message_style(
+        1,
+        format!("send a message by typing..."),
+        TextStyle::Italic,
+        TextColor::DarkGray,
+    )
+    .await;
 }
 
 async fn cb_init_incoming(public_key: String) -> bool {
@@ -561,13 +576,25 @@ async fn launch_terminal_program(
         userid.push_str(&uid.userid().to_string());
     }
     // Serve incoming commands
-    println_message_style(1, format!("Welcome to Chat-PGP"), TextStyle::Bold, TextColor::green).await;
-    println_message_style(1, format!("Using key {} {}", &cert.fingerprint(), userid), TextStyle::Normal, TextColor::gray).await;
+    println_message_style(
+        1,
+        format!("Welcome to Chat-PGP"),
+        TextStyle::Bold,
+        TextColor::Green,
+    )
+    .await;
+    println_message_style(
+        1,
+        format!("Using key {} {}", &cert.fingerprint(), userid),
+        TextStyle::Normal,
+        TextColor::Gray,
+    )
+    .await;
     println_message_style(
         1,
         format!("type 'help' for further guidance"),
         TextStyle::Italic,
-        TextColor::gray,
+        TextColor::DarkGray,
     )
     .await;
     let mut keep_running = true;
@@ -609,6 +636,13 @@ async fn launch_terminal_program(
                                     pub_encro.get_userid(),
                                     pub_encro.get_public_key_fingerprint()
                                 ),
+                            )
+                            .await;
+                            println_message_style(
+                                1,
+                                format!("send a message by typing..."),
+                                TextStyle::Italic,
+                                TextColor::DarkGray,
                             )
                             .await;
                         } else {
@@ -678,13 +712,22 @@ async fn launch_terminal_program(
                         let discovered = session.get_discovered().await;
                         let mut i = 1;
                         if discovered.len() == 0 {
-                            println_message_str(
+                            println_message_style(
                                 1,
-                                "-- Did not discover any other peers out there ¯\\_(ツ)_/¯...",
+                                "-- Did not discover any other peers out there ¯\\_(ツ)_/¯..."
+                                    .into(),
+                                TextStyle::Normal,
+                                TextColor::Red,
                             )
                             .await;
                         } else {
-                            println_message_str(1, "Peers detected:").await;
+                            println_message_style(
+                                1,
+                                "Peers detected:".into(),
+                                TextStyle::Bold,
+                                TextColor::White,
+                            )
+                            .await;
                             for peer in discovered {
                                 let peer_decoded = base64::decode(&peer).unwrap();
                                 let peer_cert = read_from_vec(&peer_decoded).unwrap();
@@ -693,9 +736,11 @@ async fn launch_terminal_program(
                                 for uid in peer_cert.userids() {
                                     peer_userid.push_str(&uid.userid().to_string());
                                 }
-                                println_message(
+                                println_message_style(
                                     1,
-                                    format!("-- {}: {} {}", i, peer_userid, peer_fingerprint),
+                                    format!("    {}: {} {}", i, peer_userid, peer_fingerprint),
+                                    TextStyle::Normal,
+                                    TextColor::Green,
                                 )
                                 .await;
                                 i += 1;
@@ -731,12 +776,14 @@ async fn launch_terminal_program(
                             } else {
                                 let go_further = response.unwrap();
                                 if go_further {
-                                    println_message(
+                                    println_message_style(
                                         1,
                                         format!(
                                             "-- Initializing chat with {} ({})",
                                             peer_userid, peer_fingerprint
                                         ),
+                                        TextStyle::Italic,
+                                        TextColor::DarkGray,
                                     )
                                     .await;
                                     let _session_id = match session
@@ -888,7 +935,7 @@ async fn launch_terminal_program(
                                                                         msg.message
                                                                     ),
                                                                     TextStyle::Bold,
-                                                                    TextColor::white
+                                                                    TextColor::White,
                                                                 )
                                                                 .await;
                                                             } else {
@@ -971,7 +1018,7 @@ async fn launch_terminal_program(
                                         1,
                                         "Failed to send the email".to_string(),
                                         TextStyle::Bold,
-                                        TextColor::red
+                                        TextColor::Red,
                                     )
                                     .await;
                                 } else {
@@ -979,7 +1026,7 @@ async fn launch_terminal_program(
                                         1,
                                         "Email sent".to_string(),
                                         TextStyle::Bold,
-                                        TextColor::green
+                                        TextColor::Green,
                                     )
                                     .await;
                                 }
@@ -1005,6 +1052,7 @@ async fn launch_terminal_program(
                                     let pub_key_decoded = pub_key_decoded.unwrap();
                                     match PGPEnCryptOwned::new_from_vec(&pub_key_decoded) {
                                         Ok(pub_encro) => {
+                                            let date_time = get_current_datetime();
                                             let fingerprint =
                                                 pub_encro.get_public_key_fingerprint();
                                             let topic_out = Topic::messaging_topic_in(&fingerprint);
@@ -1025,15 +1073,11 @@ async fn launch_terminal_program(
                                                 )
                                                 .await;
 
-                                            let (_, chat_view) =
-                                                format_chat_msg_fmt(&input, &userid, &fingerprint);
-                                            let mut chat_id = pub_encro.get_userid();
-                                            let fingerprint = short_fingerprint(
-                                                &pub_encro.get_public_key_fingerprint(),
-                                            );
-                                            chat_id.push_str(" ");
-                                            chat_id.push_str(&fingerprint);
-                                            println_chat_message(chat_id, chat_view).await;
+                                            let fingerprint =
+                                                short_fingerprint(&session.get_fingerprint().await);
+                                            let mut chatid: String = session.get_userid().await;
+                                            chatid.push_str(&format!(" {}", fingerprint));
+                                            println_chat_message(input, chatid, date_time).await;
                                         }
                                         _ => {}
                                     }

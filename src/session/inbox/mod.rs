@@ -1,5 +1,4 @@
-use crate::session::messages::{EmailMsg, SessionMessage};
-use crate::util::get_current_datetime;
+use crate::session::messages::EmailMsg;
 use serde::{Deserialize, Serialize};
 use serde_cbor;
 use std::fs::File;

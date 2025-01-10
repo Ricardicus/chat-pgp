@@ -42,6 +42,34 @@ pub struct ChatClosedCommand {
 pub struct PrintChatCommand {
     pub chatid: String,
     pub message: String,
+    pub date_time: String,
+}
+impl PrintChatCommand {
+    fn convert_to_printcmd_vec(&self) -> Vec<PrintCommand> {
+        let mut v = Vec::new();
+        let msg = PrintCommand {
+            window: 1,
+            message: format!("{} ", self.date_time),
+            style: TextStyle::Bold,
+            color: TextColor::DarkGray,
+        };
+        v.push(msg);
+        let msg = PrintCommand {
+            window: 1,
+            message: format!("{}: ", self.chatid),
+            style: TextStyle::Bold,
+            color: TextColor::Gray,
+        };
+        v.push(msg);
+        let msg = PrintCommand {
+            window: 1,
+            message: format!("{}", self.message),
+            style: TextStyle::Normal,
+            color: TextColor::White,
+        };
+        v.push(msg);
+        v
+    }
 }
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ReadCommand {
@@ -59,7 +87,7 @@ pub struct NewWindowCommand {
 }
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SetChatMessagesCommand {
-    pub chat_messages: Vec<String>,
+    pub chat_messages: Vec<Vec<PrintChatCommand>>,
 }
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SetAppStateCommand {
@@ -195,20 +223,21 @@ pub enum TextStyle {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum TextColor {
-    white,
-    green,
-    blue,
-    red,
-    gray,
-    yellow,
-    magenta,
-    black,
-    lightred,
-    lightgreen,
-    lightyellow,
-    lightblue,
-    lightmagenta,
-    lightcyan,
+    White,
+    Green,
+    Blue,
+    Red,
+    Gray,
+    DarkGray,
+    Yellow,
+    Magenta,
+    Black,
+    LightRed,
+    LightGreen,
+    LightYellow,
+    LightBlue,
+    LightMagenta,
+    LightCyan,
 }
 
 #[derive(Clone)]
@@ -219,7 +248,7 @@ struct AppState {
     pub character_index: usize,
     pub character_indexy: usize,
     pub messages: Vec<Vec<PrintCommand>>,
-    pub chat_messages: Vec<String>,
+    pub chat_messages: Vec<Vec<PrintCommand>>,
     pub chatid: String,
     pub vertical_position_chat: usize,
     pub vertical_position_commands: usize,
@@ -384,7 +413,7 @@ impl App {
                 while lines.len() <= indexy {
                     lines.push("".into());
                 }
-                if let Some(mut line) = lines.get_mut(indexy) {
+                if let Some(line) = lines.get_mut(indexy) {
                     let current_index;
                     {
                         current_index = state.character_index;
@@ -444,7 +473,7 @@ impl App {
                 window: 1,
                 message: input,
                 style: TextStyle::Normal,
-                color: TextColor::white,
+                color: TextColor::White,
             })))
             .await;
     }
@@ -561,7 +590,7 @@ impl App {
             window: 0,
             message,
             style,
-            color: TextColor::white,
+            color: TextColor::White,
         };
         let mut v = Vec::new();
         v.push(cmd);
@@ -570,8 +599,18 @@ impl App {
             .scrollstate_commands
             .content_length(state.messages.len());
     }
-    async fn set_chat_messages(&mut self, messages: Vec<String>) {
+    async fn set_chat_messages(&mut self, cmd: SetChatMessagesCommand) {
+        let messages = cmd.chat_messages;
         let mut state = self.state.lock().await;
+
+        let messages = messages
+            .iter()
+            .map(|m1| {
+                m1.iter()
+                    .flat_map(|m2| m2.convert_to_printcmd_vec())
+                    .collect::<Vec<PrintCommand>>()
+            })
+            .collect::<Vec<Vec<PrintCommand>>>();
         state.chat_messages = messages;
         state.scrollstate_chat = state
             .scrollstate_chat
@@ -589,10 +628,11 @@ impl App {
         state.chatid = chatid;
     }
 
-    async fn write_new_chat_message(&mut self, chatid: String, message: String) {
+    async fn write_new_chat_message(&mut self, cmd: PrintChatCommand) {
         let mut state = self.state.lock().await;
-        state.chatid = format!("Chatting with {}", chatid);
-        state.chat_messages.push(message);
+        state.chatid = format!(" Chatting with {} ", cmd.chatid);
+        let v = cmd.convert_to_printcmd_vec();
+        state.chat_messages.push(v);
         state.scrollstate_chat = state
             .scrollstate_chat
             .content_length(state.chat_messages.len());
@@ -603,7 +643,7 @@ impl App {
             window: 0,
             message: message.clone(),
             style: style,
-            color: TextColor::white,
+            color: TextColor::White,
         };
         if state.messages.len() > 0 {
             if let Some(last) = state.messages.last_mut() {
@@ -630,11 +670,7 @@ impl App {
         }
     }
 
-    async fn run(
-        &mut self,
-        mut terminal: DefaultTerminal,
-        pipe: &WindowPipe<WindowCommand>,
-    ) {
+    async fn run(&mut self, mut terminal: DefaultTerminal, pipe: &WindowPipe<WindowCommand>) {
         let pipe = pipe.clone();
         let mut app = self.clone();
 
@@ -658,22 +694,22 @@ impl App {
                 match timeout(timeout_duration, pipe.read()).await {
                     Ok(Ok(command)) => match command {
                         WindowCommand::Print(cmd) => {
-                            app.set_last_message(cmd)
-                                .await;
+                            app.set_last_message(cmd).await;
                         }
                         WindowCommand::Println(cmd) => {
                             app.write_new_message(cmd).await;
                         }
                         WindowCommand::ChatClosed(cmd) => {
-                            app.write_new_message_raw(cmd.message, TextStyle::Bold).await;
+                            app.write_new_message_raw(cmd.message, TextStyle::Bold)
+                                .await;
                             app.set_app_state(AppCurrentState::Commands).await;
                         }
                         WindowCommand::PrintChat(cmd) => {
                             app.set_app_state(AppCurrentState::Chat).await;
-                            app.write_new_chat_message(cmd.chatid, cmd.message).await;
+                            app.write_new_chat_message(cmd).await;
                         }
                         WindowCommand::SetChatMessages(cmd) => {
-                            app.set_chat_messages(cmd.chat_messages).await;
+                            app.set_chat_messages(cmd).await;
                         }
                         WindowCommand::SetAppState(cmd) => {
                             app.set_app_state(cmd.state).await;
@@ -749,17 +785,12 @@ impl App {
                             }
                             KeyCode::Char('q') => {
                                 match app_state {
-                                    AppCurrentState::Chat => {
-                                        app.set_app_state(AppCurrentState::Commands).await;
-                                    }
-                                    AppCurrentState::Request => {
-                                        app.set_app_state(AppCurrentState::Commands).await;
-                                    }
                                     AppCurrentState::Commands => {
                                         app.set_terminate().await;
                                         app.clear_chat().await;
                                         let _ = tx.send(None).await;
                                     }
+                                    _ => {}
                                 }
 
                                 if !app.is_in_chat_mode().await {
@@ -776,6 +807,8 @@ impl App {
                                         })))
                                         .await;
                                 }
+
+                                app.set_app_state(AppCurrentState::Commands);
                             }
                             KeyCode::Up => app.move_vertical_scroll_up().await,
                             KeyCode::Down => app.move_vertical_scroll_down().await,
@@ -894,9 +927,6 @@ impl App {
             Constraint::Min(1),
         ]);
         let [help_area, input_area, messages_area] = vertical.areas(frame.area());
-        if messages.len() > 0 {
-        } else {
-        }
         let (msg, style) = match input_mode {
             InputMode::Normal => (
                 vec![
@@ -970,20 +1000,21 @@ impl App {
                             }
 
                             match color {
-                                TextColor::white => s = s.white(),
-                                TextColor::green => s = s.green(),
-                                TextColor::blue => s = s.blue(),
-                                TextColor::red => s = s.red(),
-                                TextColor::gray => s = s.gray(),
-                                TextColor::yellow => s = s.yellow(),
-                                TextColor::magenta => s = s.magenta(),
-                                TextColor::black => s = s.black(),
-                                TextColor::lightred => s = s.light_red(),
-                                TextColor::lightgreen => s = s.light_green(),
-                                TextColor::lightyellow => s = s.light_yellow(),
-                                TextColor::lightblue => s = s.light_blue(),
-                                TextColor::lightmagenta => s = s.light_magenta(),
-                                TextColor::lightcyan => s = s.light_cyan(),
+                                TextColor::White => s = s.white(),
+                                TextColor::Green => s = s.green(),
+                                TextColor::Blue => s = s.blue(),
+                                TextColor::Red => s = s.red(),
+                                TextColor::Gray => s = s.gray(),
+                                TextColor::DarkGray => s = s.dark_gray(),
+                                TextColor::Yellow => s = s.yellow(),
+                                TextColor::Magenta => s = s.magenta(),
+                                TextColor::Black => s = s.black(),
+                                TextColor::LightRed => s = s.light_red(),
+                                TextColor::LightGreen => s = s.light_green(),
+                                TextColor::LightYellow => s = s.light_yellow(),
+                                TextColor::LightBlue => s = s.light_blue(),
+                                TextColor::LightMagenta => s = s.light_magenta(),
+                                TextColor::LightCyan => s = s.light_cyan(),
                             };
                             s
                         })
@@ -1076,7 +1107,49 @@ impl App {
 
         let messages: Vec<Line> = chat_messages
             .iter()
-            .map(|m| Line::from(Span::raw(format!("{m}"))))
+            .map(|m| {
+                Line::from(
+                    m.iter()
+                        .map(|msg| {
+                            let message = &msg.message;
+                            let style = &msg.style;
+                            let color = &msg.color;
+                            let mut s = Span::raw(format!("{message}"));
+                            match style {
+                                TextStyle::Normal => {}
+                                TextStyle::Italic => {
+                                    s = s.italic();
+                                }
+                                TextStyle::Bold => {
+                                    s = s.bold();
+                                }
+                                TextStyle::Blinking => {
+                                    s = s.add_modifier(Modifier::RAPID_BLINK);
+                                }
+                            }
+
+                            match color {
+                                TextColor::White => s = s.white(),
+                                TextColor::Green => s = s.green(),
+                                TextColor::Blue => s = s.blue(),
+                                TextColor::Red => s = s.red(),
+                                TextColor::Gray => s = s.gray(),
+                                TextColor::DarkGray => s = s.dark_gray(),
+                                TextColor::Yellow => s = s.yellow(),
+                                TextColor::Magenta => s = s.magenta(),
+                                TextColor::Black => s = s.black(),
+                                TextColor::LightRed => s = s.light_red(),
+                                TextColor::LightGreen => s = s.light_green(),
+                                TextColor::LightYellow => s = s.light_yellow(),
+                                TextColor::LightBlue => s = s.light_blue(),
+                                TextColor::LightMagenta => s = s.light_magenta(),
+                                TextColor::LightCyan => s = s.light_cyan(),
+                            };
+                            s
+                        })
+                        .collect::<Vec<Span>>(),
+                )
+            })
             .collect();
         let messages = Paragraph::new(messages)
             .block(Block::bordered().title(format!("{}", chatid)))
@@ -1135,11 +1208,14 @@ async fn send_app_state(state: AppState) {
     let _ = STATE.get().unwrap().send(state).await;
 }
 
-pub fn format_chat_msg<P: CrypticalID + Cryptical>(message: &str, encro: &P) -> (String, String) {
-    format_chat_msg_fmt(
-        message,
-        &encro.get_userid(),
-        &encro.get_public_key_fingerprint(),
+pub fn format_chat_msg<P: CrypticalID + Cryptical>(
+    message: &str,
+    encro: &P,
+) -> (String, String, String) {
+    (
+        message.into(),
+        encro.get_userid(),
+        encro.get_public_key_fingerprint(),
     )
 }
 
