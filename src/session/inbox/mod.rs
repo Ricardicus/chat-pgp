@@ -1,6 +1,7 @@
 use crate::session::messages::EmailMsg;
 use serde::{Deserialize, Serialize};
 use serde_cbor;
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, Read, Write};
 
@@ -14,6 +15,7 @@ pub struct InboxEntry {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Inbox {
     entries: Vec<InboxEntry>,
+    senders: HashMap<String, Vec<String>>,
     file: String,
 }
 
@@ -23,6 +25,7 @@ impl Inbox {
         Self {
             entries: Vec::new(),
             file: file.to_string(),
+            senders: HashMap::new(),
         }
     }
 
@@ -52,6 +55,21 @@ impl Inbox {
         Ok(inbox)
     }
 
+    pub fn get_senders(&self) -> Vec<String> {
+        self.senders.keys().cloned().collect()
+    }
+
+    pub fn get_sender_session_ids(&mut self, sender: String) -> Result<Vec<String>, ()> {
+        match self.senders.entry(sender.to_string()) {
+            std::collections::hash_map::Entry::Occupied(entry) => {
+                Ok(entry.get().clone()) // Return a clone of the Vec<String> if the key exists
+            }
+            std::collections::hash_map::Entry::Vacant(_) => {
+                Err(()) // Return an error if the key does not exist
+            }
+        }
+    }
+
     pub fn add_entry(&mut self, message: EmailMsg) -> bool {
         // Check if the email ID already exists in the inbox entries
         let id = message.get_id();
@@ -59,6 +77,10 @@ impl Inbox {
             // If the ID exists, do not add the entry
             return false;
         }
+        self.senders
+            .entry(message.sender.clone())
+            .or_insert_with(|| Vec::new())
+            .push(message.session_id.clone());
 
         // Create a new InboxEntry with the provided message
         let new_entry = InboxEntry {

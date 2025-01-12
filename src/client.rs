@@ -273,6 +273,8 @@ impl InputCommand {
         println_message_str(1, "    - Delete the record of a previous chat session").await;
         println_message_str(1, "      enumerated as per 'remind'.").await;
         println_message_str(1, "  inbox").await;
+        println_message_str(1, "  inbox list").await;
+        println_message_str(1, "    - List and enumerate all email-able peers").await;
         println_message_str(1, "  email [entry]").await;
         println_message_str(
             1,
