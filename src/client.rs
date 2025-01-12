@@ -182,6 +182,12 @@ struct EmailCommand {
 struct ExitCommand {}
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
+struct InboxCommand {}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct InboxListCommand {}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
 enum InputCommand {
     List(ListCommand),
     Initialize(InitializeCommand),
@@ -191,6 +197,8 @@ enum InputCommand {
     Rewind(RewindCommand),
     Forget(ForgetCommand),
     Email(EmailCommand),
+    Inbox(InboxCommand),
+    InboxList(InboxListCommand),
 }
 
 impl InputCommand {
@@ -201,6 +209,14 @@ impl InputCommand {
             Some("list") => {
                 let cmd = ListCommand {};
                 Some(InputCommand::List(cmd))
+            }
+            Some("inbox") => {
+                let cmd = InboxCommand {};
+                Some(InputCommand::Inbox(cmd))
+            }
+            Some("inbox-list") => {
+                let cmd = InboxListCommand {};
+                Some(InputCommand::InboxList(cmd))
             }
             Some("init") => {
                 let entry = match parts.next() {
@@ -273,20 +289,14 @@ impl InputCommand {
         println_message_str(1, "    - Delete the record of a previous chat session").await;
         println_message_str(1, "      enumerated as per 'remind'.").await;
         println_message_str(1, "  inbox").await;
-        println_message_str(1, "  inbox list").await;
+        println_message_str(1, "  inbox-list").await;
         println_message_str(1, "    - List and enumerate all email-able peers").await;
         println_message_str(1, "  email [entry]").await;
         println_message_str(
             1,
-            &format!(" There has been {} emails received since start", nbr_emails),
+            "    - Send an email to someone, enumerated as per 'inbox list'",
         )
         .await;
-        println_message_str(
-            1,
-            "  - Send an email to someone encrypted as per a previous session",
-        )
-        .await;
-        println_message_str(1, "    enumerated as per 'remind'.").await;
         println_message_str(1, "  exit").await;
         println_message_str(1, "  - Exit the program.").await;
     }
@@ -1035,6 +1045,23 @@ async fn launch_terminal_program(
                             } else {
                                 println_message_str(1, "Failed to send that email ¯\\_(ツ)_/¯...")
                                     .await;
+                            }
+                        }
+                    }
+                    Some(InputCommand::Inbox(_cmd)) => {}
+                    Some(InputCommand::InboxList(_cmd)) => {
+                        let senders = session.inbox_get_senders().await;
+                        if senders.is_empty() {
+                            println_message_style(1, "List of email-able peers is empty. You need to have established a session with a peer in the past in order to be able to send emails.".into(), TextStyle::Italic, TextColor::DarkGray).await;
+                        } else {
+                            for (index, value) in senders.iter().enumerate() {
+                                println_message_style(
+                                    1,
+                                    format!("{}. {}", index + 1, value),
+                                    TextStyle::Normal,
+                                    TextColor::White,
+                                )
+                                .await;
                             }
                         }
                     }

@@ -22,6 +22,7 @@ use crypto::{
 };
 use futures::prelude::*;
 use inbox::Inbox;
+use inbox::InboxEntry;
 use memory::{Memory, SessionLogMessage};
 use messages::MessageData::{
     Chat, Close, Discovery, DiscoveryReply, Email, Encrypted, Heartbeat, Init, InitAwait,
@@ -546,6 +547,14 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
             }
         }
         true
+    }
+
+    pub async fn inbox_get_senders(&self) -> Vec<String> {
+        self.inbox.lock().await.get_senders()
+    }
+
+    pub async fn inbox_get_entries(&self) -> Vec<InboxEntry> {
+        self.inbox.lock().await.get_entries()
     }
 
     pub async fn initialize_session_zenoh(&mut self, pub_key: String) -> Result<String, String> {
