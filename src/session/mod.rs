@@ -4,7 +4,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::sync::{mpsc, Mutex};
-use tokio::time::{timeout, Duration};
+use tokio::time::{sleep, timeout, Duration};
 
 pub mod crypto;
 pub mod inbox;
@@ -557,7 +557,11 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
         self.inbox.lock().await.get_entries()
     }
 
-    pub async fn initialize_session_zenoh(&mut self, pub_key: String) -> Result<String, String> {
+    pub async fn initialize_session_zenoh(
+        &mut self,
+        pub_key: String,
+        zenoh_handler: &ZenohHandler,
+    ) -> Result<String, String> {
         let pub_key_dec = base64::decode(&pub_key).expect("Failed to decode pub_key");
         let cert = read_from_vec(&pub_key_dec);
         if cert.is_err() {
@@ -579,15 +583,6 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
         let mut topic = Topic::Initialize.as_str().to_string();
         topic.push_str("/");
         topic.push_str(&cert.fingerprint().to_string());
-        let zc = self.middleware_config.clone();
-        let zenoh_config = Config::from_file(zc).unwrap();
-        let zenoh_session = zenoh::open(zenoh_config).await;
-        if zenoh_session.is_err() {
-            return Err("Something wrong with the middleware, cannot reach the server!".into());
-        }
-        let zenoh_session = Arc::new(Mutex::new(zenoh_session.unwrap()));
-        let handler = ZenohHandler::new(zenoh_session);
-
         let _await_response_interval = Duration::from_secs(60);
 
         {
@@ -595,7 +590,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
             requests.push((other_key_fingerprint.clone(), challenge));
         }
 
-        let _ = handler.send_message(&topic, message).await;
+        let _ = zenoh_handler.send_message(&topic, message).await;
         Ok("".to_string())
     }
 
@@ -610,16 +605,15 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
         for topic in topics {
             let tx_clone = tx.clone();
             let _t = topic.clone();
-            let zc = self.middleware_config.clone();
 
             let terminate_callbacks = self.callbacks_terminate.clone();
             let running = self.running.clone();
+
+            let zc = self.middleware_config.clone();
+            sleep(Duration::from_millis(100)).await;
             let h = tokio::spawn(async move {
-                let zenoh_session;
-                {
-                    let zenoh_config = Config::from_file(zc).unwrap();
-                    zenoh_session = zenoh::open(zenoh_config.clone()).await;
-                }
+                let zenoh_config = Config::from_file(zc).unwrap();
+                let zenoh_session = zenoh::open(zenoh_config).await;
 
                 if zenoh_session.is_err() {
                     let callbacks = terminate_callbacks.lock().await;
@@ -1826,6 +1820,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                     // Store this in memory if it exists
                     if self.memory.lock().await.in_memory(&session_id) {
                         self.inbox.lock().await.add_entry(msg.clone());
+                        let _ = self.inbox.lock().await.to_file();
                     }
                 }
                 Ok(None)

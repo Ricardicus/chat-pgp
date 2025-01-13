@@ -799,7 +799,7 @@ async fn launch_terminal_program(
                                     )
                                     .await;
                                     let _session_id = match session
-                                        .initialize_session_zenoh(peer.clone())
+                                        .initialize_session_zenoh(peer.clone(), &zenoh_handler)
                                         .await
                                     {
                                         Ok(_ok) => {}
@@ -1048,7 +1048,42 @@ async fn launch_terminal_program(
                             }
                         }
                     }
-                    Some(InputCommand::Inbox(_cmd)) => {}
+                    Some(InputCommand::Inbox(_cmd)) => {
+                        let entries = session.inbox_get_entries().await;
+                        if entries.is_empty() {
+                            println_message_style(1, "Inbox is empty. You need to have established a session with a peer in the past in order to be able to send and receive emails.".into(), TextStyle::Italic, TextColor::DarkGray).await;
+                        } else {
+                            for (index, inbox_entry) in entries.iter().enumerate() {
+                                if inbox_entry.read {
+                                    println_message_style(
+                                        1,
+                                        format!(
+                                            "{}. {} {}",
+                                            index + 1,
+                                            inbox_entry.message.date_time,
+                                            inbox_entry.message.sender
+                                        ),
+                                        TextStyle::Normal,
+                                        TextColor::White,
+                                    )
+                                    .await;
+                                } else {
+                                    println_message_style(
+                                        1,
+                                        format!(
+                                            "{}. {} {}",
+                                            index + 1,
+                                            inbox_entry.message.date_time,
+                                            inbox_entry.message.sender
+                                        ),
+                                        TextStyle::Bold,
+                                        TextColor::White,
+                                    )
+                                    .await;
+                                }
+                            }
+                        }
+                    }
                     Some(InputCommand::InboxList(_cmd)) => {
                         let senders = session.inbox_get_senders().await;
                         if senders.is_empty() {
@@ -1171,6 +1206,7 @@ async fn main() {
     let pgp_handler = PGPEnDeCrypt::new(cert.clone(), &passphrase);
     let mut session = Session::new(pgp_handler, zenoh_config.clone(), false, memory);
 
+    session.set_discovery_interval_seconds(1);
     if test_receiver {
         session.set_discovery_interval_seconds(1);
         let mut session_clone = session.clone();
