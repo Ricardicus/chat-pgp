@@ -185,6 +185,11 @@ struct ExitCommand {}
 struct InboxCommand {}
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
+struct InboxReadCommand {
+    pub entry: usize,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
 struct InboxListCommand {}
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -199,6 +204,7 @@ enum InputCommand {
     Email(EmailCommand),
     Inbox(InboxCommand),
     InboxList(InboxListCommand),
+    InboxRead(InboxReadCommand),
 }
 
 impl InputCommand {
@@ -210,14 +216,30 @@ impl InputCommand {
                 let cmd = ListCommand {};
                 Some(InputCommand::List(cmd))
             }
-            Some("inbox") => {
-                let cmd = InboxCommand {};
-                Some(InputCommand::Inbox(cmd))
-            }
-            Some("inbox-list") => {
-                let cmd = InboxListCommand {};
-                Some(InputCommand::InboxList(cmd))
-            }
+            Some("inbox") => match parts.next() {
+                Some(entry) => {
+                    let arg = entry.parse::<String>().unwrap();
+
+                    if arg == "list" {
+                        let cmd = InboxListCommand {};
+                        return Some(InputCommand::InboxList(cmd));
+                    } else if arg == "read" {
+                        let entry = match parts.next() {
+                            Some(entry) => entry.parse::<usize>().unwrap() - 1,
+                            None => 0,
+                        };
+                        let cmd = InboxReadCommand { entry };
+                        return Some(InputCommand::InboxRead(cmd));
+                    } else {
+                        let cmd = InboxCommand {};
+                        return Some(InputCommand::Inbox(cmd));
+                    }
+                }
+                None => {
+                    let cmd = InboxCommand {};
+                    Some(InputCommand::Inbox(cmd))
+                }
+            },
             Some("init") => {
                 let entry = match parts.next() {
                     Some(entry) => entry.parse::<usize>().unwrap(),
@@ -275,37 +297,72 @@ impl InputCommand {
             TextColor::White,
         )
         .await;
-        println_message_str(1, "  list").await;
+        println_message_style(1, "  list".into(), TextStyle::Bold, TextColor::White).await;
         println_message_str(1, "    - List and enumerate all discovered peers.").await;
-        println_message_str(1, "  init [entry]").await;
+        println_message_style(
+            1,
+            "  init [entry]".into(),
+            TextStyle::Bold,
+            TextColor::White,
+        )
+        .await;
         println_message_str(1, "    - Initialize a chat session with a peer").await;
         println_message_str(1, "      enumerated as per 'list'").await;
-        println_message_str(1, "  remind").await;
+        println_message_style(1, "  remind".into(), TextStyle::Bold, TextColor::White).await;
         println_message_str(1, "    - List and enumerate encrypted and stored sessions.").await;
-        println_message_str(1, "  rewind [entry]").await;
+        println_message_style(
+            1,
+            "  rewind [entry]".into(),
+            TextStyle::Bold,
+            TextColor::White,
+        )
+        .await;
+
         println_message_str(1, "    - Decrypts and displays previous chat sessions").await;
         println_message_str(1, "      enumerated as per 'remind'.").await;
-        println_message_str(1, "  forget [entry]").await;
+        println_message_style(
+            1,
+            "  forget [entry]".into(),
+            TextStyle::Bold,
+            TextColor::White,
+        )
+        .await;
         println_message_str(1, "    - Delete the record of a previous chat session").await;
         println_message_str(1, "      enumerated as per 'remind'.").await;
-        println_message_str(1, "  inbox").await;
-        println_message_str(1, "  inbox-list").await;
+        println_message_style(1, "  inbox".into(), TextStyle::Bold, TextColor::White).await;
+        println_message_style(1, "  inbox list".into(), TextStyle::Bold, TextColor::White).await;
         println_message_str(1, "    - List and enumerate all email-able peers").await;
-        println_message_str(1, "  email [entry]").await;
+        println_message_style(
+            1,
+            "  inbox read [entry]".into(),
+            TextStyle::Bold,
+            TextColor::White,
+        )
+        .await;
+        println_message_str(1, "    - Read an incoming message from the inbox").await;
+        println_message_style(
+            1,
+            "  email [entry]".into(),
+            TextStyle::Bold,
+            TextColor::White,
+        )
+        .await;
         println_message_str(
             1,
             "    - Send an email to someone, enumerated as per 'inbox list'",
         )
         .await;
-        println_message_str(1, "  exit").await;
+        println_message_style(1, "  exit".into(), TextStyle::Bold, TextColor::White).await;
         println_message_str(1, "  - Exit the program.").await;
     }
     async fn print_small_help() {
         println_message(1, InputCommand::get_small_help()).await;
     }
+
     fn get_small_help() -> String {
         "Welcome to Chat-PGP. Type 'help' for help.".to_string()
     }
+
     async fn read_yes_or_no(
         window: usize,
         prompt: &str,
@@ -1098,6 +1155,43 @@ async fn launch_terminal_program(
                                 )
                                 .await;
                             }
+                        }
+                    }
+                    Some(InputCommand::InboxRead(cmd)) => {
+                        let entry = session.inbox_get_entry(cmd.entry).await;
+                        if entry.is_ok() {
+                            let entry = entry.unwrap();
+                            println_message_str(1, "").await;
+                            println_message_style(
+                                1,
+                                format!("Author: {}", entry.message.sender),
+                                TextStyle::Normal,
+                                TextColor::DarkGray,
+                            )
+                            .await;
+                            println_message_style(
+                                1,
+                                format!("Time: {}", entry.message.date_time),
+                                TextStyle::Normal,
+                                TextColor::DarkGray,
+                            )
+                            .await;
+                            println_message_str(1, "").await;
+                            println_message_style(
+                                1,
+                                entry.message.message.clone(),
+                                TextStyle::Normal,
+                                TextColor::White,
+                            )
+                            .await;
+                        } else {
+                            println_message_style(
+                                1,
+                                format!("There is no entry nbr {} in the inbox.", cmd.entry),
+                                TextStyle::Italic,
+                                TextColor::DarkGray,
+                            )
+                            .await;
                         }
                     }
                     None => {

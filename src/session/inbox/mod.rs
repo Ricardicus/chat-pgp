@@ -33,6 +33,13 @@ impl Inbox {
         self.entries.clone()
     }
 
+    pub fn get_entry(&self, entry: usize) -> Result<InboxEntry, ()> {
+        match self.entries.get(entry) {
+            Some(value) => Ok(value.clone()),
+            None => Err(()),
+        }
+    }
+
     /// Serializes the Memory struct to an array of bytes using CBOR.
     fn serialize(&self) -> Vec<u8> {
         serde_cbor::to_vec(&self).expect("Failed to serialize Memory")

@@ -557,6 +557,10 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
         self.inbox.lock().await.get_entries()
     }
 
+    pub async fn inbox_get_entry(&self, entry: usize) -> Result<InboxEntry, ()> {
+        self.inbox.lock().await.get_entry(entry)
+    }
+
     pub async fn initialize_session_zenoh(
         &mut self,
         pub_key: String,
