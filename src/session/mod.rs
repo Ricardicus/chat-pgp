@@ -25,15 +25,15 @@ use inbox::Inbox;
 use inbox::InboxEntry;
 use memory::{Memory, SessionLogMessage};
 use messages::MessageData::{
-    Chat, Close, Discovery, DiscoveryReply, Email, Encrypted, Heartbeat, Init, InitAwait,
-    InitDecline, InitOk, Internal, Ping, Replay, ReplayResponse,
+    Chat, Close, Discovery, DiscoveryReply, Email, Encrypted, EncryptedRelay, Heartbeat, Init,
+    InitAwait, InitDecline, InitOk, Internal, Ping, Replay, ReplayResponse,
 };
 use messages::MessagingError::*;
 use messages::SessionMessage as Message;
 use messages::{
-    ChatMsg, EmailMsg, EncryptedMsg, MessageData, MessageListener, MessagebleTopicAsync,
-    MessagebleTopicAsyncPublishReads, MessagebleTopicAsyncReadTimeout, MessagingError,
-    SessionErrorCodes, SessionErrorMsg,
+    ChatMsg, EmailMsg, EncryptedMsg, EncryptedRelayMsg, MessageData, MessageListener,
+    MessagebleTopicAsync, MessagebleTopicAsyncPublishReads, MessagebleTopicAsyncReadTimeout,
+    MessagingError, SessionErrorCodes, SessionErrorMsg,
 };
 use middleware::ZenohHandler;
 use protocol::*;
@@ -1744,11 +1744,13 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                     });
                 }
             }
-            Encrypted(msg) => {
+            EncryptedRelay(msg) => {
                 if self.relay {
-                    if let Some(messages_in_session) =
-                        relay.put_message(session_id.clone(), incoming_message.clone())
-                    {
+                    let msg = Message {
+                        message: MessageData::Encrypted(EncryptedMsg { data: msg.data }),
+                        session_id: session_id.to_string(),
+                    };
+                    if let Some(messages_in_session) = relay.put_message(session_id.clone(), msg) {
                         println!(
                             "session {} has {} messages in memory",
                             session_id, messages_in_session
@@ -1757,7 +1759,9 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                         println!("failed to add message to session {}", session_id);
                     }
                 }
-
+                return Ok(None);
+            }
+            Encrypted(msg) => {
                 let session_key_old = self.memory.lock().await.get_encrypted_sym_key(&session_id);
                 if session_key_old.is_ok() {
                     // decrypt the encrypted symmetrical key
@@ -2015,7 +2019,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                     }
                 };
                 let msg = Message {
-                    message: MessageData::Encrypted(EncryptedMsg {
+                    message: MessageData::EncryptedRelay(EncryptedRelayMsg {
                         data: msg_encrypted,
                     }),
                     session_id: session_id.to_string(),

@@ -88,6 +88,11 @@ pub struct EncryptedMsg {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct EncryptedRelayMsg {
+    pub data: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct EmailMsg {
     pub session_id: String,
     pub sender: String,
@@ -154,6 +159,7 @@ pub enum MessageData {
     Ping(PingMsg),
     Pong(PongMsg),
     Encrypted(EncryptedMsg),
+    EncryptedRelay(EncryptedRelayMsg),
     SessionError(SessionErrorMsg),
     KeyPass(KeyPassMsg),
     Discovery(DiscoveryMsg),
