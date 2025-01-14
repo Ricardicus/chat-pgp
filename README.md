@@ -52,7 +52,7 @@ If you want to build and run with a gpg key with fingerprint D54FED01913E2120AD9
 
 If you don't have a gpg-key already, the program will generate one for you with the user id of "chatpgp@example.org". 
 
-## Email infrastructue 
+## Email infrastructure 
 
 It is possible to enable an email feature to the server infrastructure also.
 In order to do this, you need to run the relay program also connected to the zenoh server.
