@@ -91,7 +91,7 @@ pub struct EncryptedMsg {
 pub struct EmailMsg {
     pub session_id: String,
     pub sender: String,
-    pub message: EncryptedMsg,
+    pub message: String,
     pub date_time: String,
 }
 
@@ -100,7 +100,7 @@ impl EmailMsg {
         let mut s = String::new();
         s.push_str(&self.session_id);
         s.push_str(&self.sender);
-        s.push_str(&self.message.data);
+        s.push_str(&self.message);
         s.push_str(&self.date_time);
         s
     }
@@ -340,10 +340,10 @@ impl SessionMessage {
         }
     }
 
-    pub fn new_email(session_id: String, sender: String, encrypted_msg: EncryptedMsg) -> Self {
+    pub fn new_email(session_id: String, sender: String, message: String) -> Self {
         SessionMessage {
             message: MessageData::Email(EmailMsg {
-                message: encrypted_msg,
+                message,
                 sender,
                 session_id,
                 date_time: get_current_datetime(),

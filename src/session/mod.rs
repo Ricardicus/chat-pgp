@@ -31,7 +31,7 @@ use messages::MessageData::{
 use messages::MessagingError::*;
 use messages::SessionMessage as Message;
 use messages::{
-    ChatMsg, EncryptedMsg, MessageData, MessageListener, MessagebleTopicAsync,
+    ChatMsg, EmailMsg, EncryptedMsg, MessageData, MessageListener, MessagebleTopicAsync,
     MessagebleTopicAsyncPublishReads, MessagebleTopicAsyncReadTimeout, MessagingError,
     SessionErrorCodes, SessionErrorMsg,
 };
@@ -1741,6 +1741,19 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                 }
             }
             Encrypted(msg) => {
+                if self.relay {
+                    if let Some(messages_in_session) =
+                        relay.put_message(session_id.clone(), incoming_message.clone())
+                    {
+                        println!(
+                            "session {} has {} messages in memory",
+                            session_id, messages_in_session
+                        );
+                    } else {
+                        println!("failed to add message to session {}", session_id);
+                    }
+                }
+
                 let session_key_old = self.memory.lock().await.get_encrypted_sym_key(&session_id);
                 if session_key_old.is_ok() {
                     // decrypt the encrypted symmetrical key
@@ -1803,11 +1816,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
             Email(msg) => {
                 let session_id = msg.session_id.clone();
                 if self.relay {
-                    println!("Received email from session {}", session_id);
-                    let msg = Message {
-                        session_id: session_id.clone(),
-                        message: MessageData::Encrypted(msg.message),
-                    };
+                    /*
                     if let Some(messages_in_session) = relay.put_message(session_id.clone(), msg) {
                         println!(
                             "session {} has {} messages in memory",
@@ -1815,7 +1824,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                         );
                     } else {
                         println!("failed to add message to session {}", session_id);
-                    }
+                    }*/
                 } else {
                     // Store this in memory if it exists
                     if self.memory.lock().await.in_memory(&session_id) {
@@ -1983,18 +1992,30 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                 let sym_key = sym_key.unwrap();
                 let cipher = ChaCha20Poly1305EnDeCrypt::new_from_str(&sym_key);
 
-                let msg_encrypted = match cipher.encrypt(&message) {
+                let email = EmailMsg {
+                    session_id: session_id.to_owned(),
+                    sender: self.get_userid().await,
+                    message: message.clone(),
+                    date_time: get_current_datetime(),
+                };
+                let msg = Message {
+                    message: MessageData::Email(email),
+                    session_id: session_id.to_string(),
+                };
+                let email_ser = msg.serialize().unwrap();
+
+                let msg_encrypted = match cipher.encrypt(&email_ser) {
                     Ok(m) => m,
                     Err(_) => {
                         return Err(());
                     }
                 };
-                let msg_enc = EncryptedMsg {
-                    data: msg_encrypted,
+                let msg = Message {
+                    message: MessageData::Encrypted(EncryptedMsg {
+                        data: msg_encrypted,
+                    }),
+                    session_id: session_id.to_string(),
                 };
-                let sender = self.get_userid().await;
-                let msg = Message::new_email(session_id.to_string(), sender, msg_enc);
-
                 match gateway.send_message(&topic, msg).await {
                     Ok(_) => {}
                     Err(_error) => return Err(()),
@@ -2116,7 +2137,6 @@ impl SessionRelay {
         match PGPEnCryptOwned::new_from_vec(&pub_key_decoded) {
             Ok(pub_encro) => {
                 let key = pub_encro.get_public_key_fingerprint();
-                println!("register participant: {} -> {}", key, session_id);
                 match self.keys_to_sessions.get_mut(&key) {
                     Some(ids) => {
                         if ids.contains(&session_id.to_string()) {

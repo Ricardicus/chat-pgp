@@ -1206,7 +1206,7 @@ async fn main() {
     let pgp_handler = PGPEnDeCrypt::new(cert.clone(), &passphrase);
     let mut session = Session::new(pgp_handler, zenoh_config.clone(), false, memory);
 
-    session.set_discovery_interval_seconds(1);
+    //session.set_discovery_interval_seconds(1);
     if test_receiver {
         session.set_discovery_interval_seconds(1);
         let mut session_clone = session.clone();
