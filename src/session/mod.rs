@@ -2039,13 +2039,13 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
 }
 
 #[derive(Clone)]
-struct SessionRelayEntry {
+pub struct SessionRelayEntry {
     pub buffer: AllocRingBuffer<Message>,
     pub last_active: DateTime<Utc>,
 }
 
 #[derive(Clone)]
-struct SessionRelay {
+pub struct SessionRelay {
     pub memory: HashMap<String, SessionRelayEntry>,
     pub keys_to_sessions: HashMap<String, Vec<String>>,
     pub max_sessions: usize,
