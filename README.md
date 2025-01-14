@@ -78,7 +78,7 @@ This is a work in progress. So far I have this:
 - Communcations based on Zenoh
 - Encrypted one-to-one online chat in terminal (ncurses) interface.
 - Terminal interface based on ratatui
-- E-mail message retrieval via online relay
+- E-mail message retrieval via relay
 
 Will work on this:
 
