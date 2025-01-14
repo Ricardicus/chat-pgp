@@ -123,9 +123,7 @@ async fn chat_reset_messages() {
 async fn set_app_state(state: AppCurrentState) {
     PIPE.get()
         .unwrap()
-        .send(WindowCommand::SetAppState(SetAppStateCommand {
-            state: AppCurrentState::Commands,
-        }))
+        .send(WindowCommand::SetAppState(SetAppStateCommand { state }))
         .await;
 }
 async fn println_chat_message(message: String, chatid: String, date_time: String) {
@@ -289,7 +287,7 @@ impl InputCommand {
         }
     }
 
-    async fn print_help(nbr_emails: u64) {
+    async fn print_help() {
         let _help_text = String::new();
         println_message_style(
             1,
@@ -365,7 +363,6 @@ impl InputCommand {
     }
 
     async fn read_yes_or_no(
-        window: usize,
         prompt: &str,
         rx: &mut mpsc::Receiver<Option<WindowCommand>>,
     ) -> Result<bool, ()> {
@@ -441,7 +438,7 @@ async fn cb_chat_input(
     };
     match PGPEnCryptOwned::new_from_vec(&pub_key_decoded) {
         Ok(pub_encro) => {
-            let fingerprint = pub_encro.get_public_key_fingerprint();
+            let _fingerprint = pub_encro.get_public_key_fingerprint();
         }
         _ => {}
     }
@@ -599,13 +596,6 @@ async fn terminate(session_tx: mpsc::Sender<(String, String)>) {
         .await;
 }
 
-async fn terminal_program(
-    session_tx: mpsc::Sender<(String, String)>,
-    cert: Arc<Cert>,
-    session: Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt>,
-) {
-}
-
 async fn launch_terminal_program(
     cert: Arc<Cert>,
     session_tx: mpsc::Sender<(String, String)>,
@@ -694,7 +684,7 @@ async fn launch_terminal_program(
                         .await;
                         println_message_str(1, "-- Do you want to chat with this peer? [y/n]")
                             .await;
-                        let r = InputCommand::read_yes_or_no(1, ">> ", &mut rx).await;
+                        let r = InputCommand::read_yes_or_no(">> ", &mut rx).await;
                         if r.is_ok() && r.unwrap() {
                             let _ = session.accept_pending_request(&session_id).await;
                             println_message_str(1, "-- Accepted this chat request.").await;
@@ -841,7 +831,7 @@ async fn launch_terminal_program(
                                 ),
                             )
                             .await;
-                            let response = InputCommand::read_yes_or_no(1, ">> ", &mut rx).await;
+                            let response = InputCommand::read_yes_or_no(">> ", &mut rx).await;
                             if response.is_err() {
                             } else {
                                 let go_further = response.unwrap();
@@ -887,7 +877,7 @@ async fn launch_terminal_program(
                     }
                     Some(InputCommand::Help(_)) => {
                         // Print help
-                        InputCommand::print_help(session.get_nbr_emails().await).await;
+                        InputCommand::print_help().await;
                     }
                     Some(InputCommand::Remind(_)) => {
                         let ids = session.get_reminded_session_ids().await;
@@ -1057,7 +1047,7 @@ async fn launch_terminal_program(
                                 )
                                 .await;
                             }
-                            let r = InputCommand::read_yes_or_no(1, ">> ", &mut rx).await;
+                            let r = InputCommand::read_yes_or_no(">> ", &mut rx).await;
                             if r.is_ok() && r.unwrap() {
                                 let _ = session.remove_memory_entry(&ids[entry - 1]).await;
                                 println_message_str(1, "The memory has been removed!").await;
@@ -1099,7 +1089,7 @@ async fn launch_terminal_program(
                                 }
                             }
                         }
-                        if peers.len() == 0 || entry > peers.len() || entry < 0 {
+                        if peers.len() == 0 || entry > peers.len() {
                             println_message_str(
                                 1,
                                 "There is no memory of that peer ¯\\_(ツ)_/¯...",
@@ -1114,7 +1104,7 @@ async fn launch_terminal_program(
                             &format!("-- Do you want to send an email to {}? [y/n]", peer),
                         )
                         .await;
-                        let r = InputCommand::read_yes_or_no(1, ">> ", &mut rx).await;
+                        let r = InputCommand::read_yes_or_no(">> ", &mut rx).await;
                         if r.is_ok() && r.unwrap() {
                             let session_id = peer_to_session_id.get(peer).unwrap();
                             let content =
@@ -1190,13 +1180,7 @@ async fn launch_terminal_program(
                             println_message_style(1, "List of email-able peers is empty. You need to have established a session with a peer in the past in order to be able to send emails.".into(), TextStyle::Italic, TextColor::DarkGray).await;
                         } else {
                             let mut peers = Vec::<String>::new();
-                            for (i, id) in ids.iter().enumerate() {
-                                let len =
-                                    session.get_reminded_length(id).await.unwrap_or_else(|_| 0);
-                                let last_active = session
-                                    .get_reminded_last_active(id)
-                                    .await
-                                    .unwrap_or_else(|_| "".to_string());
+                            for (_, id) in ids.iter().enumerate() {
                                 let others = session
                                     .get_reminded_others(id)
                                     .await
@@ -1316,7 +1300,7 @@ async fn launch_terminal_program(
                                 }
                             }
                         } else {
-                            InputCommand::print_help(session.get_nbr_emails().await).await;
+                            InputCommand::print_help().await;
                         }
                     }
                 }
