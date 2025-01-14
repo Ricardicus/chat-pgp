@@ -76,7 +76,7 @@ This is a work in progress. So far I have this:
 
 - PGP assymetrical encryption using pre-existing pgp-keys (you can create them with gpg)
 - Communcations based on Zenoh
-- Encrypted one-to-one online chat in terminal (ncurses) interface.
+- Encrypted one-to-one online chat
 - Terminal interface based on ratatui
 - E-mail message retrieval via relay
 

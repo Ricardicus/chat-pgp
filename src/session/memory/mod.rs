@@ -107,7 +107,7 @@ impl Memory {
 
     pub fn in_memory(&self, session_id: &str) -> bool {
         match self.session_log.get(session_id) {
-            Some(entry) => true,
+            Some(_) => true,
             None => false,
         }
     }

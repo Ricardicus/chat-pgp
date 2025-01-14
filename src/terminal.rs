@@ -808,7 +808,7 @@ impl App {
                                         .await;
                                 }
 
-                                app.set_app_state(AppCurrentState::Commands);
+                                app.set_app_state(AppCurrentState::Commands).await;
                             }
                             KeyCode::Up => app.move_vertical_scroll_up().await,
                             KeyCode::Down => app.move_vertical_scroll_down().await,
@@ -853,14 +853,14 @@ impl App {
     }
 
     fn draw_request(frame: &mut Frame, state: &mut AppState) {
-        let messages = &state.messages;
+        let _messages = &state.messages;
         let input = &state.input;
         let input_mode = &state.input_mode;
         let request_text = &state.request_text;
         let character_index = state.character_index;
         let character_indexy = state.character_indexy;
-        let chat_messages = &state.chat_messages;
-        let chatid = &state.chatid;
+        let _chat_messages = &state.chat_messages;
+        let _chatid = &state.chatid;
         let vertical = Layout::vertical([Constraint::Length(1), Constraint::Min(4)]);
         let [help_area, input_area] = vertical.areas(frame.area());
 
@@ -919,8 +919,8 @@ impl App {
         let input = &state.input;
         let input_mode = &state.input_mode;
         let character_index = state.character_index;
-        let chat_messages = &state.chat_messages;
-        let chatid = &state.chatid;
+        let _chat_messages = &state.chat_messages;
+        let _chatid = &state.chatid;
         let vertical = Layout::vertical([
             Constraint::Length(1),
             Constraint::Length(3),
@@ -1044,7 +1044,7 @@ impl App {
     }
 
     fn draw_commands_chat(frame: &mut Frame, state: &mut AppState) {
-        let messages = &state.messages;
+        let _messages = &state.messages;
         let input = &state.input;
         let input_mode = &state.input_mode;
         let character_index = state.character_index;

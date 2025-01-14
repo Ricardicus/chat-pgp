@@ -1035,11 +1035,10 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                             _ => {}
                         }
                     }
-                    match self.handle_message(msg, &topic, &mut relay).await {
+                    match self.handle_message(msg, &topic, &mut relay, false).await {
                         Ok(Some(res)) => {
                             // Do something
                             let response = res.0;
-                            let session_id = &response.session_id;
                             let topic_response = res.1;
                             if topic_response == "terminate" {
                                 *keep_running.lock().await = false;
@@ -1240,6 +1239,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
         message: Message,
         topic: &str,
         relay: &mut SessionRelay,
+        has_been_decypted: bool,
     ) -> Result<Option<(Message, String)>, SessionErrorMsg> {
         let mut topic_response = topic.to_string();
         let mut response = Message::new_discovery("Hello world".to_string());
@@ -1304,7 +1304,9 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                 for message in msg.messages {
                     let v = *self.added_emails.lock().await;
                     *self.added_emails.lock().await = v + 1;
-                    let _ = self.handle_message(message, topic, relay).await;
+                    let _ = self
+                        .handle_message(message, topic, relay, has_been_decypted)
+                        .await;
                 }
                 return Ok(None);
             }
@@ -1553,8 +1555,6 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                                     // Store conversation in memory
                                     let mut others = Vec::new();
                                     others.push(pub_encro.get_public_key_as_base64());
-                                    let sym_key_encrypted_host =
-                                        sym_cipher_key_encrypted_host.clone();
 
                                     self.memory.lock().await.new_entry(
                                         msg.session_id.clone(),
@@ -1673,9 +1673,6 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                             message: "Invalid key".to_owned(),
                         });
                     }
-                    let cert = cert.unwrap();
-                    let other_key_fingerprint = cert.fingerprint().to_string();
-
                     let cipher = ChaCha20Poly1305EnDeCrypt::new_from_str(&sym_key);
                     let key = session_id;
                     let session_data = SessionData {
@@ -1779,7 +1776,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
 
                         if dec_msg.is_ok() {
                             let dec_msg = dec_msg.unwrap();
-                            let _ = self.handle_message(dec_msg, topic, relay).await;
+                            let _ = self.handle_message(dec_msg, topic, relay, true).await;
                         }
                     }
                 }
@@ -1817,7 +1814,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                 }
                 if dec_msg.is_some() {
                     let dec_msg = dec_msg.unwrap();
-                    self.handle_message(dec_msg, topic, relay).await
+                    self.handle_message(dec_msg, topic, relay, true).await
                 } else {
                     return Err(SessionErrorMsg {
                         code: SessionErrorCodes::Encryption as u32,
@@ -1826,6 +1823,9 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                 }
             }
             Email(msg) => {
+                if !has_been_decypted {
+                    return Ok(None);
+                }
                 let session_id = msg.session_id.clone();
                 if self.relay {
                     /*
