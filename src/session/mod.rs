@@ -549,6 +549,10 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
         true
     }
 
+    pub async fn inbox_get_sender_session_ids(&self, sender: String) -> Result<Vec<String>, ()> {
+        self.inbox.lock().await.get_sender_session_ids(sender)
+    }
+
     pub async fn inbox_get_senders(&self) -> Vec<String> {
         self.inbox.lock().await.get_senders()
     }

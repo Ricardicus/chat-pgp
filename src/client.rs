@@ -12,6 +12,7 @@ use session::Session;
 use std::fs;
 use std::future::Future;
 
+use std::collections::HashMap;
 use std::pin::Pin;
 use std::process::exit;
 use std::sync::Arc;
@@ -1064,16 +1065,58 @@ async fn launch_terminal_program(
                         }
                     }
                     Some(InputCommand::Email(cmd)) => {
-                        let entry = cmd.entry;
+                        let entry = cmd.entry - 1;
                         let ids = session.get_reminded_session_ids().await;
-                        if ids.len() == 0 || entry > ids.len() || entry <= 0 {
+                        let mut peers = Vec::<String>::new();
+                        let mut peer_to_session_id = HashMap::<String, String>::new();
+                        if ids.len() == 0 {
+                            println_message_style(1, "List of email-able peers is empty. You need to have established a session with a peer in the past in order to be able to send emails.".into(), TextStyle::Italic, TextColor::DarkGray).await;
+                        } else {
+                            for (_, id) in ids.iter().enumerate() {
+                                let others = session
+                                    .get_reminded_others(id)
+                                    .await
+                                    .unwrap_or_else(|_| Vec::new());
+                                for other in others.iter() {
+                                    let pub_key_decoded = match base64::decode(other) {
+                                        Err(_) => Err(()),
+                                        Ok(pub_key) => Ok(pub_key),
+                                    };
+                                    if pub_key_decoded.is_ok() {
+                                        let pub_key_decoded = pub_key_decoded.unwrap();
+                                        match PGPEnCryptOwned::new_from_vec(&pub_key_decoded) {
+                                            Ok(pub_encro) => {
+                                                let userid = pub_encro.get_userid();
+                                                if !peers.contains(&userid) {
+                                                    peers.push(userid.clone());
+                                                    peer_to_session_id
+                                                        .insert(userid.clone(), id.clone());
+                                                }
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if peers.len() == 0 || entry > peers.len() || entry < 0 {
                             println_message_str(
                                 1,
-                                "There is no memory of that session ¯\\_(ツ)_/¯...",
+                                "There is no memory of that peer ¯\\_(ツ)_/¯...",
                             )
                             .await;
-                        } else {
-                            let session_id = &ids[entry - 1];
+                        }
+
+                        let peer = peers.get(entry).unwrap();
+
+                        println_message_str(
+                            1,
+                            &format!("-- Do you want to send an email to {}? [y/n]", peer),
+                        )
+                        .await;
+                        let r = InputCommand::read_yes_or_no(1, ">> ", &mut rx).await;
+                        if r.is_ok() && r.unwrap() {
+                            let session_id = peer_to_session_id.get(peer).unwrap();
                             let content =
                                 InputCommand::read_incoming("Write email content", &mut rx).await;
                             if content.is_ok() {
@@ -1142,11 +1185,42 @@ async fn launch_terminal_program(
                         }
                     }
                     Some(InputCommand::InboxList(_cmd)) => {
-                        let senders = session.inbox_get_senders().await;
-                        if senders.is_empty() {
+                        let ids = session.get_reminded_session_ids().await;
+                        if ids.len() == 0 {
                             println_message_style(1, "List of email-able peers is empty. You need to have established a session with a peer in the past in order to be able to send emails.".into(), TextStyle::Italic, TextColor::DarkGray).await;
                         } else {
-                            for (index, value) in senders.iter().enumerate() {
+                            let mut peers = Vec::<String>::new();
+                            for (i, id) in ids.iter().enumerate() {
+                                let len =
+                                    session.get_reminded_length(id).await.unwrap_or_else(|_| 0);
+                                let last_active = session
+                                    .get_reminded_last_active(id)
+                                    .await
+                                    .unwrap_or_else(|_| "".to_string());
+                                let others = session
+                                    .get_reminded_others(id)
+                                    .await
+                                    .unwrap_or_else(|_| Vec::new());
+                                for other in others.iter() {
+                                    let pub_key_decoded = match base64::decode(other) {
+                                        Err(_) => Err(()),
+                                        Ok(pub_key) => Ok(pub_key),
+                                    };
+                                    if pub_key_decoded.is_ok() {
+                                        let pub_key_decoded = pub_key_decoded.unwrap();
+                                        match PGPEnCryptOwned::new_from_vec(&pub_key_decoded) {
+                                            Ok(pub_encro) => {
+                                                let userid = pub_encro.get_userid();
+                                                if !peers.contains(&userid) {
+                                                    peers.push(pub_encro.get_userid());
+                                                }
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                }
+                            }
+                            for (index, value) in peers.iter().enumerate() {
                                 println_message_style(
                                     1,
                                     format!("{}. {}", index + 1, value),
