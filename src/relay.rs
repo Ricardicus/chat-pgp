@@ -4,8 +4,8 @@ mod pgp;
 #[allow(dead_code)]
 mod session;
 mod util;
-use session::crypto::{PGPEnCryptOwned, PGPEnDeCrypt};
-use session::messages::{MessagingError, SessionMessage};
+use session::crypto::PGPEnDeCrypt;
+use session::messages::MessagingError;
 use session::Session;
 use std::sync::Arc;
 

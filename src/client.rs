@@ -12,6 +12,7 @@ use session::Session;
 use std::fs;
 use std::future::Future;
 
+use std::collections::HashMap;
 use std::pin::Pin;
 use std::process::exit;
 use std::sync::Arc;
@@ -25,7 +26,7 @@ mod util;
 use util::{get_current_datetime, short_fingerprint};
 
 mod pgp;
-use pgp::pgp::{generate_new_key, read_from_gpg, read_from_vec};
+use pgp::pgp::{generate_new_key_with, read_from_gpg, read_from_vec};
 
 extern crate sequoia_openpgp as openpgp;
 use openpgp::cert::prelude::*;
@@ -35,9 +36,9 @@ use ncurses::*;
 
 mod terminal;
 use terminal::{
-    format_chat_msg, format_chat_msg_fmt, AppCurrentState, ChatClosedCommand, PrintChatCommand,
-    PrintCommand, SetAppStateCommand, SetChatMessagesCommand, TextStyle, WindowCommand,
-    WindowManager, WindowPipe,
+    format_chat_msg, AppCurrentState, ChatClosedCommand, PrintChatCommand, PrintCommand,
+    SetAppStateCommand, SetChatMessagesCommand, TextColor, TextStyle, WindowCommand, WindowManager,
+    WindowPipe,
 };
 
 #[derive(Parser)]
@@ -63,6 +64,10 @@ struct Cli {
     #[clap(short, long)]
     #[arg(default_value = "zenoh/config.json5")]
     zenoh_config: String,
+
+    #[clap(short, long)]
+    #[arg(default_value = "chatpgp@example.com")]
+    email: String,
 }
 
 // Create a global instance of WindowManager
@@ -75,16 +80,29 @@ async fn println_message(window: usize, message: String) {
             window,
             message,
             style: TextStyle::Normal,
+            color: TextColor::White,
         }))
         .await;
 }
-async fn println_message_style(window: usize, message: String, style: TextStyle) {
+async fn println_message_style(window: usize, message: String, style: TextStyle, color: TextColor) {
     PIPE.get()
         .unwrap()
         .send(WindowCommand::Println(PrintCommand {
             window,
             message,
             style,
+            color,
+        }))
+        .await;
+}
+async fn printf_message_style(window: usize, message: String, style: TextStyle, color: TextColor) {
+    PIPE.get()
+        .unwrap()
+        .send(WindowCommand::Print(PrintCommand {
+            window,
+            message,
+            style,
+            color,
         }))
         .await;
 }
@@ -110,12 +128,13 @@ async fn set_app_state(state: AppCurrentState) {
         }))
         .await;
 }
-async fn println_chat_message(chatid: String, message: String) {
+async fn println_chat_message(message: String, chatid: String, date_time: String) {
     PIPE.get()
         .unwrap()
         .send(WindowCommand::PrintChat(PrintChatCommand {
             chatid,
             message,
+            date_time,
         }))
         .await;
 }
@@ -126,6 +145,7 @@ async fn print_message(window: usize, message: String) {
             window,
             message,
             style: TextStyle::Normal,
+            color: TextColor::White,
         }))
         .await;
 }
@@ -156,7 +176,22 @@ struct ForgetCommand {
     pub entry: usize,
 }
 #[derive(Serialize, Deserialize, Clone, Debug)]
+struct EmailCommand {
+    pub entry: usize,
+}
+#[derive(Serialize, Deserialize, Clone, Debug)]
 struct ExitCommand {}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct InboxCommand {}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct InboxReadCommand {
+    pub entry: usize,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct InboxListCommand {}
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 enum InputCommand {
@@ -167,6 +202,10 @@ enum InputCommand {
     Remind(RemindCommand),
     Rewind(RewindCommand),
     Forget(ForgetCommand),
+    Email(EmailCommand),
+    Inbox(InboxCommand),
+    InboxList(InboxListCommand),
+    InboxRead(InboxReadCommand),
 }
 
 impl InputCommand {
@@ -178,6 +217,30 @@ impl InputCommand {
                 let cmd = ListCommand {};
                 Some(InputCommand::List(cmd))
             }
+            Some("inbox") => match parts.next() {
+                Some(entry) => {
+                    let arg = entry.parse::<String>().unwrap();
+
+                    if arg == "list" {
+                        let cmd = InboxListCommand {};
+                        return Some(InputCommand::InboxList(cmd));
+                    } else if arg == "read" {
+                        let entry = match parts.next() {
+                            Some(entry) => entry.parse::<usize>().unwrap() - 1,
+                            None => 0,
+                        };
+                        let cmd = InboxReadCommand { entry };
+                        return Some(InputCommand::InboxRead(cmd));
+                    } else {
+                        let cmd = InboxCommand {};
+                        return Some(InputCommand::Inbox(cmd));
+                    }
+                }
+                None => {
+                    let cmd = InboxCommand {};
+                    Some(InputCommand::Inbox(cmd))
+                }
+            },
             Some("init") => {
                 let entry = match parts.next() {
                     Some(entry) => entry.parse::<usize>().unwrap(),
@@ -214,35 +277,93 @@ impl InputCommand {
                 let cmd = ForgetCommand { entry };
                 Some(InputCommand::Forget(cmd))
             }
+            Some("email") => {
+                let entry = match parts.next() {
+                    Some(entry) => entry.parse::<usize>().unwrap(),
+                    None => 0,
+                };
+                let cmd = EmailCommand { entry };
+                Some(InputCommand::Email(cmd))
+            }
             _ => None,
         }
     }
 
-    async fn print_help() {
+    async fn print_help(nbr_emails: u64) {
         let _help_text = String::new();
-        println_message_str(1, "Available commands:").await;
-        println_message_str(1, "  list").await;
-        println_message_str(1, "  - List and enumerate all discovered peers.").await;
-        println_message_str(1, "  init [entry]").await;
-        println_message_str(1, "  - Initialize a chat session with a peer").await;
-        println_message_str(1, "    enumerated as per 'list'").await;
-        println_message_str(1, "  remind").await;
-        println_message_str(1, "  - List and enumerate encrypted and stored sessions.").await;
-        println_message_str(1, "  rewind [entry]").await;
-        println_message_str(1, "  - Decrypts and displays previous chat sessions").await;
-        println_message_str(1, "    enumerated as per 'remind'.").await;
-        println_message_str(1, "  forget [entry]").await;
-        println_message_str(1, "  - Delete the record of a previous chat session").await;
-        println_message_str(1, "    enumerated as per 'remind'.").await;
-        println_message_str(1, "  exit").await;
+        println_message_style(
+            1,
+            "Available commands:".into(),
+            TextStyle::Bold,
+            TextColor::White,
+        )
+        .await;
+        println_message_style(1, "  list".into(), TextStyle::Bold, TextColor::White).await;
+        println_message_str(1, "    - List and enumerate all discovered peers.").await;
+        println_message_style(
+            1,
+            "  init [entry]".into(),
+            TextStyle::Bold,
+            TextColor::White,
+        )
+        .await;
+        println_message_str(1, "    - Initialize a chat session with a peer").await;
+        println_message_str(1, "      enumerated as per 'list'").await;
+        println_message_style(1, "  remind".into(), TextStyle::Bold, TextColor::White).await;
+        println_message_str(1, "    - List and enumerate encrypted and stored sessions.").await;
+        println_message_style(
+            1,
+            "  rewind [entry]".into(),
+            TextStyle::Bold,
+            TextColor::White,
+        )
+        .await;
+
+        println_message_str(1, "    - Decrypts and displays previous chat sessions").await;
+        println_message_str(1, "      enumerated as per 'remind'.").await;
+        println_message_style(
+            1,
+            "  forget [entry]".into(),
+            TextStyle::Bold,
+            TextColor::White,
+        )
+        .await;
+        println_message_str(1, "    - Delete the record of a previous chat session").await;
+        println_message_str(1, "      enumerated as per 'remind'.").await;
+        println_message_style(1, "  inbox".into(), TextStyle::Bold, TextColor::White).await;
+        println_message_style(1, "  inbox list".into(), TextStyle::Bold, TextColor::White).await;
+        println_message_str(1, "    - List and enumerate all email-able peers").await;
+        println_message_style(
+            1,
+            "  inbox read [entry]".into(),
+            TextStyle::Bold,
+            TextColor::White,
+        )
+        .await;
+        println_message_str(1, "    - Read an incoming message from the inbox").await;
+        println_message_style(
+            1,
+            "  email [entry]".into(),
+            TextStyle::Bold,
+            TextColor::White,
+        )
+        .await;
+        println_message_str(
+            1,
+            "    - Send an email to someone, enumerated as per 'inbox list'",
+        )
+        .await;
+        println_message_style(1, "  exit".into(), TextStyle::Bold, TextColor::White).await;
         println_message_str(1, "  - Exit the program.").await;
     }
     async fn print_small_help() {
         println_message(1, InputCommand::get_small_help()).await;
     }
+
     fn get_small_help() -> String {
         "Welcome to Chat-PGP. Type 'help' for help.".to_string()
     }
+
     async fn read_yes_or_no(
         window: usize,
         prompt: &str,
@@ -265,6 +386,25 @@ impl InputCommand {
         }
         Ok(false)
     }
+    async fn read_incoming(
+        prompt: &str,
+        rx: &mut mpsc::Receiver<Option<WindowCommand>>,
+    ) -> Result<String, ()> {
+        println_message_style(1, prompt.to_string(), TextStyle::Bold, TextColor::Green).await;
+        let input = rx.recv().await;
+        if input.is_some() {
+            let input = input.unwrap();
+            if input.is_some() {
+                let input = input.unwrap();
+                let input = match input {
+                    WindowCommand::Println(input) => input.message,
+                    _ => "".into(),
+                };
+                return Ok(input);
+            }
+        }
+        Err(())
+    }
 }
 
 async fn cb_chat(public_key: String, message: String) {
@@ -276,11 +416,12 @@ async fn cb_chat(public_key: String, message: String) {
     };
     match PGPEnCryptOwned::new_from_vec(&pub_key_decoded) {
         Ok(pub_encro) => {
-            let (mut chat_id, chat_view) = format_chat_msg(&message, &pub_encro);
-            let fingerprint = short_fingerprint(&pub_encro.get_public_key_fingerprint());
-            chat_id.push_str(" ");
-            chat_id.push_str(&fingerprint);
-            println_chat_message(chat_id, chat_view).await;
+            let date_time = get_current_datetime();
+            let (message, mut userid, fingerprint) = format_chat_msg(&message, &pub_encro);
+            let fingerprint = short_fingerprint(&fingerprint);
+            userid.push_str(" ");
+            userid.push_str(&fingerprint);
+            println_chat_message(message, userid, date_time).await;
         }
         _ => {}
     }
@@ -417,6 +558,13 @@ async fn cb_init_accepted(_public_key: String) {
         format!("-- Peer accepted the connection. You can now chat!"),
     )
     .await;
+    println_message_style(
+        1,
+        format!("send a message by typing..."),
+        TextStyle::Italic,
+        TextColor::DarkGray,
+    )
+    .await;
 }
 
 async fn cb_init_incoming(public_key: String) -> bool {
@@ -454,7 +602,7 @@ async fn terminate(session_tx: mpsc::Sender<(String, String)>) {
 async fn terminal_program(
     session_tx: mpsc::Sender<(String, String)>,
     cert: Arc<Cert>,
-    mut session: Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt>,
+    session: Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt>,
 ) {
 }
 
@@ -497,11 +645,28 @@ async fn launch_terminal_program(
     for uid in cert.userids() {
         userid.push_str(&uid.userid().to_string());
     }
-    let mut upper_prompt = format!("-- Using key {} {}", &cert.fingerprint(), userid);
-    upper_prompt.push_str("\n");
-    upper_prompt.push_str(&InputCommand::get_small_help());
     // Serve incoming commands
-    InputCommand::print_small_help().await;
+    println_message_style(
+        1,
+        format!("Welcome to Chat-PGP"),
+        TextStyle::Bold,
+        TextColor::Green,
+    )
+    .await;
+    println_message_style(
+        1,
+        format!("Using key {} {}", &cert.fingerprint(), userid),
+        TextStyle::Normal,
+        TextColor::Gray,
+    )
+    .await;
+    println_message_style(
+        1,
+        format!("type 'help' for further guidance"),
+        TextStyle::Italic,
+        TextColor::DarkGray,
+    )
+    .await;
     let mut keep_running = true;
     while keep_running {
         let pending = session.get_pending_request().await;
@@ -541,6 +706,13 @@ async fn launch_terminal_program(
                                     pub_encro.get_userid(),
                                     pub_encro.get_public_key_fingerprint()
                                 ),
+                            )
+                            .await;
+                            println_message_style(
+                                1,
+                                format!("send a message by typing..."),
+                                TextStyle::Italic,
+                                TextColor::DarkGray,
                             )
                             .await;
                         } else {
@@ -610,13 +782,22 @@ async fn launch_terminal_program(
                         let discovered = session.get_discovered().await;
                         let mut i = 1;
                         if discovered.len() == 0 {
-                            println_message_str(
+                            println_message_style(
                                 1,
-                                "-- Did not discover any other peers out there ¯\\_(ツ)_/¯...",
+                                "-- Did not discover any other peers out there ¯\\_(ツ)_/¯..."
+                                    .into(),
+                                TextStyle::Normal,
+                                TextColor::Red,
                             )
                             .await;
                         } else {
-                            println_message_str(1, "Peers detected:").await;
+                            println_message_style(
+                                1,
+                                "Peers detected:".into(),
+                                TextStyle::Bold,
+                                TextColor::White,
+                            )
+                            .await;
                             for peer in discovered {
                                 let peer_decoded = base64::decode(&peer).unwrap();
                                 let peer_cert = read_from_vec(&peer_decoded).unwrap();
@@ -625,9 +806,11 @@ async fn launch_terminal_program(
                                 for uid in peer_cert.userids() {
                                     peer_userid.push_str(&uid.userid().to_string());
                                 }
-                                println_message(
+                                println_message_style(
                                     1,
-                                    format!("-- {}: {} {}", i, peer_userid, peer_fingerprint),
+                                    format!("    {}: {} {}", i, peer_userid, peer_fingerprint),
+                                    TextStyle::Normal,
+                                    TextColor::Green,
                                 )
                                 .await;
                                 i += 1;
@@ -663,16 +846,18 @@ async fn launch_terminal_program(
                             } else {
                                 let go_further = response.unwrap();
                                 if go_further {
-                                    println_message(
+                                    println_message_style(
                                         1,
                                         format!(
                                             "-- Initializing chat with {} ({})",
                                             peer_userid, peer_fingerprint
                                         ),
+                                        TextStyle::Italic,
+                                        TextColor::DarkGray,
                                     )
                                     .await;
                                     let _session_id = match session
-                                        .initialize_session_zenoh(peer.clone())
+                                        .initialize_session_zenoh(peer.clone(), &zenoh_handler)
                                         .await
                                     {
                                         Ok(_ok) => {}
@@ -702,7 +887,7 @@ async fn launch_terminal_program(
                     }
                     Some(InputCommand::Help(_)) => {
                         // Print help
-                        InputCommand::print_help().await;
+                        InputCommand::print_help(session.get_nbr_emails().await).await;
                     }
                     Some(InputCommand::Remind(_)) => {
                         let ids = session.get_reminded_session_ids().await;
@@ -820,6 +1005,7 @@ async fn launch_terminal_program(
                                                                         msg.message
                                                                     ),
                                                                     TextStyle::Bold,
+                                                                    TextColor::White,
                                                                 )
                                                                 .await;
                                                             } else {
@@ -878,7 +1064,210 @@ async fn launch_terminal_program(
                             }
                         }
                     }
+                    Some(InputCommand::Email(cmd)) => {
+                        let entry = cmd.entry - 1;
+                        let ids = session.get_reminded_session_ids().await;
+                        let mut peers = Vec::<String>::new();
+                        let mut peer_to_session_id = HashMap::<String, String>::new();
+                        if ids.len() == 0 {
+                            println_message_style(1, "List of email-able peers is empty. You need to have established a session with a peer in the past in order to be able to send emails.".into(), TextStyle::Italic, TextColor::DarkGray).await;
+                        } else {
+                            for (_, id) in ids.iter().enumerate() {
+                                let others = session
+                                    .get_reminded_others(id)
+                                    .await
+                                    .unwrap_or_else(|_| Vec::new());
+                                for other in others.iter() {
+                                    let pub_key_decoded = match base64::decode(other) {
+                                        Err(_) => Err(()),
+                                        Ok(pub_key) => Ok(pub_key),
+                                    };
+                                    if pub_key_decoded.is_ok() {
+                                        let pub_key_decoded = pub_key_decoded.unwrap();
+                                        match PGPEnCryptOwned::new_from_vec(&pub_key_decoded) {
+                                            Ok(pub_encro) => {
+                                                let userid = pub_encro.get_userid();
+                                                if !peers.contains(&userid) {
+                                                    peers.push(userid.clone());
+                                                    peer_to_session_id
+                                                        .insert(userid.clone(), id.clone());
+                                                }
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if peers.len() == 0 || entry > peers.len() || entry < 0 {
+                            println_message_str(
+                                1,
+                                "There is no memory of that peer ¯\\_(ツ)_/¯...",
+                            )
+                            .await;
+                        }
 
+                        let peer = peers.get(entry).unwrap();
+
+                        println_message_str(
+                            1,
+                            &format!("-- Do you want to send an email to {}? [y/n]", peer),
+                        )
+                        .await;
+                        let r = InputCommand::read_yes_or_no(1, ">> ", &mut rx).await;
+                        if r.is_ok() && r.unwrap() {
+                            let session_id = peer_to_session_id.get(peer).unwrap();
+                            let content =
+                                InputCommand::read_incoming("Write email content", &mut rx).await;
+                            if content.is_ok() {
+                                let content = content.unwrap();
+                                println_message_str(1, "Sending message...").await;
+                                let res = session
+                                    .send_email(session_id, content, &zenoh_handler)
+                                    .await;
+                                if res.is_err() {
+                                    println_message_style(
+                                        1,
+                                        "Failed to send the email".to_string(),
+                                        TextStyle::Bold,
+                                        TextColor::Red,
+                                    )
+                                    .await;
+                                } else {
+                                    println_message_style(
+                                        1,
+                                        "Email sent".to_string(),
+                                        TextStyle::Bold,
+                                        TextColor::Green,
+                                    )
+                                    .await;
+                                }
+                            } else {
+                                println_message_str(1, "Failed to send that email ¯\\_(ツ)_/¯...")
+                                    .await;
+                            }
+                        }
+                    }
+                    Some(InputCommand::Inbox(_cmd)) => {
+                        let entries = session.inbox_get_entries().await;
+                        if entries.is_empty() {
+                            println_message_style(1, "Inbox is empty. You need to have established a session with a peer in the past in order to be able to send and receive emails.".into(), TextStyle::Italic, TextColor::DarkGray).await;
+                        } else {
+                            for (index, inbox_entry) in entries.iter().enumerate() {
+                                if inbox_entry.read {
+                                    println_message_style(
+                                        1,
+                                        format!(
+                                            "{}. {} {}",
+                                            index + 1,
+                                            inbox_entry.message.date_time,
+                                            inbox_entry.message.sender
+                                        ),
+                                        TextStyle::Normal,
+                                        TextColor::White,
+                                    )
+                                    .await;
+                                } else {
+                                    println_message_style(
+                                        1,
+                                        format!(
+                                            "{}. {} {}",
+                                            index + 1,
+                                            inbox_entry.message.date_time,
+                                            inbox_entry.message.sender
+                                        ),
+                                        TextStyle::Bold,
+                                        TextColor::White,
+                                    )
+                                    .await;
+                                }
+                            }
+                        }
+                    }
+                    Some(InputCommand::InboxList(_cmd)) => {
+                        let ids = session.get_reminded_session_ids().await;
+                        if ids.len() == 0 {
+                            println_message_style(1, "List of email-able peers is empty. You need to have established a session with a peer in the past in order to be able to send emails.".into(), TextStyle::Italic, TextColor::DarkGray).await;
+                        } else {
+                            let mut peers = Vec::<String>::new();
+                            for (i, id) in ids.iter().enumerate() {
+                                let len =
+                                    session.get_reminded_length(id).await.unwrap_or_else(|_| 0);
+                                let last_active = session
+                                    .get_reminded_last_active(id)
+                                    .await
+                                    .unwrap_or_else(|_| "".to_string());
+                                let others = session
+                                    .get_reminded_others(id)
+                                    .await
+                                    .unwrap_or_else(|_| Vec::new());
+                                for other in others.iter() {
+                                    let pub_key_decoded = match base64::decode(other) {
+                                        Err(_) => Err(()),
+                                        Ok(pub_key) => Ok(pub_key),
+                                    };
+                                    if pub_key_decoded.is_ok() {
+                                        let pub_key_decoded = pub_key_decoded.unwrap();
+                                        match PGPEnCryptOwned::new_from_vec(&pub_key_decoded) {
+                                            Ok(pub_encro) => {
+                                                let userid = pub_encro.get_userid();
+                                                if !peers.contains(&userid) {
+                                                    peers.push(pub_encro.get_userid());
+                                                }
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                }
+                            }
+                            for (index, value) in peers.iter().enumerate() {
+                                println_message_style(
+                                    1,
+                                    format!("{}. {}", index + 1, value),
+                                    TextStyle::Normal,
+                                    TextColor::White,
+                                )
+                                .await;
+                            }
+                        }
+                    }
+                    Some(InputCommand::InboxRead(cmd)) => {
+                        let entry = session.inbox_get_entry(cmd.entry).await;
+                        if entry.is_ok() {
+                            let entry = entry.unwrap();
+                            println_message_str(1, "").await;
+                            println_message_style(
+                                1,
+                                format!("Author: {}", entry.message.sender),
+                                TextStyle::Normal,
+                                TextColor::DarkGray,
+                            )
+                            .await;
+                            println_message_style(
+                                1,
+                                format!("Time: {}", entry.message.date_time),
+                                TextStyle::Normal,
+                                TextColor::DarkGray,
+                            )
+                            .await;
+                            println_message_str(1, "").await;
+                            println_message_style(
+                                1,
+                                entry.message.message.clone(),
+                                TextStyle::Normal,
+                                TextColor::White,
+                            )
+                            .await;
+                        } else {
+                            println_message_style(
+                                1,
+                                format!("There is no entry nbr {} in the inbox.", cmd.entry),
+                                TextStyle::Italic,
+                                TextColor::DarkGray,
+                            )
+                            .await;
+                        }
+                    }
                     None => {
                         // Send this input to listeners
                         if input.len() > 0 && session.get_number_of_sessions().await > 0 {
@@ -895,6 +1284,7 @@ async fn launch_terminal_program(
                                     let pub_key_decoded = pub_key_decoded.unwrap();
                                     match PGPEnCryptOwned::new_from_vec(&pub_key_decoded) {
                                         Ok(pub_encro) => {
+                                            let date_time = get_current_datetime();
                                             let fingerprint =
                                                 pub_encro.get_public_key_fingerprint();
                                             let topic_out = Topic::messaging_topic_in(&fingerprint);
@@ -915,22 +1305,18 @@ async fn launch_terminal_program(
                                                 )
                                                 .await;
 
-                                            let (_, chat_view) =
-                                                format_chat_msg_fmt(&input, &userid, &fingerprint);
-                                            let mut chat_id = pub_encro.get_userid();
-                                            let fingerprint = short_fingerprint(
-                                                &pub_encro.get_public_key_fingerprint(),
-                                            );
-                                            chat_id.push_str(" ");
-                                            chat_id.push_str(&fingerprint);
-                                            println_chat_message(chat_id, chat_view).await;
+                                            let fingerprint =
+                                                short_fingerprint(&session.get_fingerprint().await);
+                                            let mut chatid: String = session.get_userid().await;
+                                            chatid.push_str(&format!(" {}", fingerprint));
+                                            println_chat_message(input, chatid, date_time).await;
                                         }
                                         _ => {}
                                     }
                                 }
                             }
                         } else {
-                            InputCommand::print_help().await;
+                            InputCommand::print_help(session.get_nbr_emails().await).await;
                         }
                     }
                 }
@@ -956,12 +1342,13 @@ async fn main() {
     let test_receiver = cli.test_receiver;
     let zenoh_config = cli.zenoh_config;
     let memory = !cli.no_memory;
+    let email = cli.email;
 
     let mut cert = None;
 
     // check if gpgkey == "new"
     if gpgkey == "new" {
-        cert = Some(generate_new_key().unwrap());
+        cert = Some(generate_new_key_with(email).unwrap());
     }
 
     let mut passphrase = String::new();
@@ -987,6 +1374,7 @@ async fn main() {
     let pgp_handler = PGPEnDeCrypt::new(cert.clone(), &passphrase);
     let mut session = Session::new(pgp_handler, zenoh_config.clone(), false, memory);
 
+    //session.set_discovery_interval_seconds(1);
     if test_receiver {
         session.set_discovery_interval_seconds(1);
         let mut session_clone = session.clone();

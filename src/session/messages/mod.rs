@@ -9,12 +9,14 @@ pub enum EncryptionType {
     Assymetric,
     Symmetric,
 }
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct InitMsg {
     pub pub_key: String,
     pub signature: String,
     pub challenge: String,
 }
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct InitOkMsg {
     pub sym_key_encrypted: String,
@@ -22,16 +24,19 @@ pub struct InitOkMsg {
     pub orig_pub_key: String,
     pub challenge_sig: String,
 }
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct InitAwaitMsg {
     pub pub_key: String,
     pub orig_pub_key: String,
 }
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct InitDeclineMsg {
     pub pub_key: String,
     pub message: String,
 }
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct KeyPassMsg {
     pub sym_key: String,
@@ -54,8 +59,9 @@ pub struct ChatMsg {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ReplayMsg {
-    pub session_id: String,
+    pub key_id: String,
 }
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ReplayResponseMsg {
     pub session_id: String,
@@ -79,6 +85,30 @@ pub struct PongMsg {}
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct EncryptedMsg {
     pub data: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct EncryptedRelayMsg {
+    pub data: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct EmailMsg {
+    pub session_id: String,
+    pub sender: String,
+    pub message: String,
+    pub date_time: String,
+}
+
+impl EmailMsg {
+    pub fn get_id(&self) -> String {
+        let mut s = String::new();
+        s.push_str(&self.session_id);
+        s.push_str(&self.sender);
+        s.push_str(&self.message);
+        s.push_str(&self.date_time);
+        s
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -129,6 +159,7 @@ pub enum MessageData {
     Ping(PingMsg),
     Pong(PongMsg),
     Encrypted(EncryptedMsg),
+    EncryptedRelay(EncryptedRelayMsg),
     SessionError(SessionErrorMsg),
     KeyPass(KeyPassMsg),
     Discovery(DiscoveryMsg),
@@ -137,6 +168,7 @@ pub enum MessageData {
     Heartbeat(HeartbeatMsg),
     Replay(ReplayMsg),
     ReplayResponse(ReplayResponseMsg),
+    Email(EmailMsg),
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -305,12 +337,24 @@ impl SessionMessage {
         }
     }
 
-    pub fn new_replay(session_id: String) -> Self {
+    pub fn new_replay(key_id: String) -> Self {
         SessionMessage {
             message: MessageData::Replay(ReplayMsg {
-                session_id: session_id.clone(),
+                key_id: key_id.clone(),
             }),
-            session_id: session_id.clone(),
+            session_id: "".to_string(),
+        }
+    }
+
+    pub fn new_email(session_id: String, sender: String, message: String) -> Self {
+        SessionMessage {
+            message: MessageData::Email(EmailMsg {
+                message,
+                sender,
+                session_id,
+                date_time: get_current_datetime(),
+            }),
+            session_id: "".into(),
         }
     }
 

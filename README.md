@@ -52,6 +52,23 @@ If you want to build and run with a gpg key with fingerprint D54FED01913E2120AD9
 
 If you don't have a gpg-key already, the program will generate one for you with the user id of "chatpgp@example.org". 
 
+## Email infrastructue 
+
+It is possible to enable an email feature to the server infrastructure also.
+In order to do this, you need to run the relay program also connected to the zenoh server.
+The relay program will store encrypted messages in memory when running and once you are
+online again, it will send you what it has received.
+
+Only after you have successfully established a peer-to-peer connection you can send "emails" to that
+peer. To set up a relay broker connected to the zenoh server run the relay program.
+
+```bash
+cargo build --release
+./target/release/relay
+```
+
+You most likely will want to pass the "-z" flag to the relay program, and provide it with the 
+same configuration file that you use for the clients.
 
 ## Work in progress
 
@@ -61,6 +78,7 @@ This is a work in progress. So far I have this:
 - Communcations based on Zenoh
 - Encrypted one-to-one online chat in terminal (ncurses) interface.
 - Terminal interface based on ratatui
+- E-mail message retrieval via relay
 
 Will work on this:
 
@@ -71,7 +89,6 @@ Will work on this:
 
 Want to add:
 - Group chat (not sure how to implement)
-- Message retrieval after offline (not sure how to implement, possibly write my own router - a lot of considerations)
 
 Today the platform only works strictly online, with both peers connected at the same time.
 

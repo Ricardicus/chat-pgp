@@ -4,9 +4,10 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::sync::{mpsc, Mutex};
-use tokio::time::{timeout, Duration};
+use tokio::time::{sleep, timeout, Duration};
 
 pub mod crypto;
+pub mod inbox;
 pub mod memory;
 pub mod messages;
 pub mod middleware;
@@ -20,17 +21,19 @@ use crypto::{
     CrypticalID, CrypticalSign, CrypticalVerify, PGPEnCryptOwned, PGPEnDeCrypt,
 };
 use futures::prelude::*;
+use inbox::Inbox;
+use inbox::InboxEntry;
 use memory::{Memory, SessionLogMessage};
 use messages::MessageData::{
-    Chat, Close, Discovery, DiscoveryReply, Encrypted, Heartbeat, Init, InitAwait, InitDecline,
-    InitOk, Internal, Ping, Replay, ReplayResponse,
+    Chat, Close, Discovery, DiscoveryReply, Email, Encrypted, EncryptedRelay, Heartbeat, Init,
+    InitAwait, InitDecline, InitOk, Internal, Ping, Replay, ReplayResponse,
 };
 use messages::MessagingError::*;
 use messages::SessionMessage as Message;
 use messages::{
-    ChatMsg, EncryptedMsg, MessageData, MessageListener, MessagebleTopicAsync,
-    MessagebleTopicAsyncPublishReads, MessagebleTopicAsyncReadTimeout, MessagingError, ReplayMsg,
-    SessionErrorCodes, SessionErrorMsg,
+    ChatMsg, EmailMsg, EncryptedMsg, EncryptedRelayMsg, MessageData, MessageListener,
+    MessagebleTopicAsync, MessagebleTopicAsyncPublishReads, MessagebleTopicAsyncReadTimeout,
+    MessagingError, SessionErrorCodes, SessionErrorMsg,
 };
 use middleware::ZenohHandler;
 use protocol::*;
@@ -148,9 +151,11 @@ where
     pub middleware_config: String,
     discovery_interval_seconds: u64,
     heartbeat_interval_seconds: u64,
+    added_emails: Arc<Mutex<u64>>,
     relay: bool,
     memory: Arc<Mutex<Memory>>,
     memory_active: bool,
+    inbox: Arc<Mutex<Inbox>>,
     running: Arc<Mutex<bool>>,
 }
 
@@ -163,7 +168,12 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
     ) -> Self {
         let (tx, rx) = mpsc::channel(100);
         let (tx_chat, rx_chat) = mpsc::channel(100);
-        let memory_file = ".memory";
+        let fingerprint = host_encro.get_public_key_fingerprint();
+        let memory_file = &format!(".memory_{}", fingerprint);
+        let inbox_file = &format!(".inbox_{}", fingerprint);
+        if relay {
+            println!("relay session");
+        }
         Session {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             discovered: Arc::new(Mutex::new(HashMap::new())),
@@ -191,9 +201,13 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
             heartbeat_interval_seconds: 10,
             relay: relay,
             memory: Arc::new(Mutex::new(
-                Memory::from_file(".memory").unwrap_or_else(|_| Memory::new()),
+                Memory::from_file(memory_file).unwrap_or_else(|_| Memory::new(&memory_file)),
             )),
             memory_active,
+            inbox: Arc::new(Mutex::new(
+                Inbox::from_file(inbox_file).unwrap_or_else(|_| Inbox::new(&inbox_file)),
+            )),
+            added_emails: Arc::new(Mutex::new(0)),
             running: Arc::new(Mutex::new(true)),
         }
     }
@@ -224,8 +238,10 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
             discovery_interval_seconds: self.discovery_interval_seconds,
             heartbeat_interval_seconds: self.heartbeat_interval_seconds,
             relay: self.relay,
+            added_emails: self.added_emails.clone(),
             memory: self.memory.clone(),
             memory_active: self.memory_active,
+            inbox: self.inbox.clone(),
             running: self.running.clone(),
         }
     }
@@ -533,7 +549,27 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
         true
     }
 
-    pub async fn initialize_session_zenoh(&mut self, pub_key: String) -> Result<String, String> {
+    pub async fn inbox_get_sender_session_ids(&self, sender: String) -> Result<Vec<String>, ()> {
+        self.inbox.lock().await.get_sender_session_ids(sender)
+    }
+
+    pub async fn inbox_get_senders(&self) -> Vec<String> {
+        self.inbox.lock().await.get_senders()
+    }
+
+    pub async fn inbox_get_entries(&self) -> Vec<InboxEntry> {
+        self.inbox.lock().await.get_entries()
+    }
+
+    pub async fn inbox_get_entry(&self, entry: usize) -> Result<InboxEntry, ()> {
+        self.inbox.lock().await.get_entry(entry)
+    }
+
+    pub async fn initialize_session_zenoh(
+        &mut self,
+        pub_key: String,
+        zenoh_handler: &ZenohHandler,
+    ) -> Result<String, String> {
         let pub_key_dec = base64::decode(&pub_key).expect("Failed to decode pub_key");
         let cert = read_from_vec(&pub_key_dec);
         if cert.is_err() {
@@ -555,15 +591,6 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
         let mut topic = Topic::Initialize.as_str().to_string();
         topic.push_str("/");
         topic.push_str(&cert.fingerprint().to_string());
-        let zc = self.middleware_config.clone();
-        let zenoh_config = Config::from_file(zc).unwrap();
-        let zenoh_session = zenoh::open(zenoh_config).await;
-        if zenoh_session.is_err() {
-            return Err("Something wrong with the middleware, cannot reach the server!".into());
-        }
-        let zenoh_session = Arc::new(Mutex::new(zenoh_session.unwrap()));
-        let handler = ZenohHandler::new(zenoh_session);
-
         let _await_response_interval = Duration::from_secs(60);
 
         {
@@ -571,7 +598,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
             requests.push((other_key_fingerprint.clone(), challenge));
         }
 
-        let _ = handler.send_message(&topic, message).await;
+        let _ = zenoh_handler.send_message(&topic, message).await;
         Ok("".to_string())
     }
 
@@ -586,13 +613,15 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
         for topic in topics {
             let tx_clone = tx.clone();
             let _t = topic.clone();
-            let zc = self.middleware_config.clone();
 
             let terminate_callbacks = self.callbacks_terminate.clone();
             let running = self.running.clone();
+
+            let zc = self.middleware_config.clone();
+            sleep(Duration::from_millis(100)).await;
             let h = tokio::spawn(async move {
                 let zenoh_config = Config::from_file(zc).unwrap();
-                let zenoh_session = zenoh::open(zenoh_config.clone()).await;
+                let zenoh_session = zenoh::open(zenoh_config).await;
 
                 if zenoh_session.is_err() {
                     let callbacks = terminate_callbacks.lock().await;
@@ -899,6 +928,24 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
         self.discovery_interval_seconds = interval_seconds;
     }
 
+    pub async fn launch_replay_request(&mut self, handler: Arc<Mutex<ZenohHandler>>) {
+        let key_fingerprint = self.host_encro.lock().await.get_public_key_fingerprint();
+        let handler = handler.clone();
+        tokio::spawn(async move {
+            // Give it some time for infra to be set up
+            tokio::time::sleep(Duration::from_secs(2)).await;
+
+            // Send request for replay
+            let replay_topic = Topic::replay_topic(&key_fingerprint);
+            let message = Message::new_replay(key_fingerprint);
+            let _ = handler
+                .lock()
+                .await
+                .send_message(&replay_topic, message)
+                .await;
+        });
+    }
+
     pub async fn serve(&mut self) -> Result<(), MessagingError> {
         let mut identifier = self.host_encro.lock().await.get_public_key_fingerprint();
         let mut topics_to_subscribe = Vec::new();
@@ -913,36 +960,44 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
         let discover_topic = Topic::Discover.to_string();
         let heartbeat_topic = Topic::heartbeat_topic(identifier.as_ref());
 
-        topics_to_subscribe.push(init_topic);
-        topics_to_subscribe.push(close_topic);
-
         if self.relay {
-            let messaging_topic = Topic::messaging_topic_in(identifier.as_ref());
+            let email_topic = Topic::email_topic(identifier.as_ref());
             let replay_topic = Topic::replay_topic(identifier.as_ref());
-            topics_to_subscribe.push(messaging_topic);
+            topics_to_subscribe.push(email_topic);
             topics_to_subscribe.push(replay_topic);
+            topics_to_subscribe.push(init_topic);
         } else {
+            let replay_response_topic = Topic::replay_response_topic(identifier.as_ref());
+            topics_to_subscribe.push(init_topic);
+            topics_to_subscribe.push(close_topic);
             topics_to_subscribe.push(discover_topic);
             topics_to_subscribe.push(heartbeat_topic);
+            topics_to_subscribe.push(replay_response_topic);
         }
 
         let tx_clone = self.tx.clone();
         self.serve_topics(topics_to_subscribe, &tx_clone, false)
             .await;
         let zc = self.middleware_config.clone();
-        let zenoh_config = Config::from_file(zc).unwrap();
-        let zenoh_session = zenoh::open(zenoh_config).await;
+        let zenoh_session;
+        {
+            let zenoh_config = Config::from_file(zc).unwrap();
+            zenoh_session = zenoh::open(zenoh_config).await;
+        }
         if zenoh_session.is_err() {
             return Err(MessagingError::ZenohError);
         }
         let zenoh_session = zenoh_session.unwrap();
         let zenoh_session_responder = Arc::new(Mutex::new(zenoh_session));
         let responder = Arc::new(Mutex::new(ZenohHandler::new(zenoh_session_responder)));
+
         if !self.relay {
             // Send discover message each minut
             self.launch_discovery(responder.clone()).await;
             // Launch session housekeeping
             self.launch_session_housekeeping(responder.clone()).await;
+            // Launch memory retrieval task
+            self.launch_replay_request(responder.clone()).await;
         }
         let keep_running = self.running.clone();
         let mut relay = SessionRelay::new(54, 124);
@@ -980,11 +1035,6 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                             _ => {}
                         }
                     }
-                    if session_id.len() > 0 {
-                        if self.relay {
-                            relay.put_message(session_id.clone(), msg.clone());
-                        }
-                    }
                     match self.handle_message(msg, &topic, &mut relay).await {
                         Ok(Some(res)) => {
                             // Do something
@@ -996,12 +1046,10 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                                 continue;
                             }
                             let _ = response.clone();
-                            if !self.relay {
-                                let responder = responder.lock().await;
-                                let _ = responder
-                                    .send_message(&topic_response, response.clone())
-                                    .await;
-                            }
+                            let responder = responder.lock().await;
+                            let _ = responder
+                                .send_message(&topic_response, response.clone())
+                                .await;
                         }
                         Ok(None) => {}
                         Err(errormessage) => {
@@ -1025,7 +1073,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
         self.close_sessions(responder).await;
 
         if self.memory_active {
-            let _ = self.memory.lock().await.to_file(".memory");
+            let _ = self.memory.lock().await.to_file();
         }
         return Ok(());
     }
@@ -1086,7 +1134,6 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
         let msg = Message::new_replay(session_id.to_string());
         {
             let h = sender.lock().await;
-            println!("sending {}", topic);
             h.send_message(&topic, msg).await?;
         }
         Ok(())
@@ -1167,6 +1214,17 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
         ids
     }
 
+    pub async fn get_nbr_emails(&self) -> u64 {
+        return self
+            .inbox
+            .lock()
+            .await
+            .get_entries()
+            .len()
+            .try_into()
+            .unwrap();
+    }
+
     pub async fn get_pub_key_from_session_id(&self, session_id: &str) -> Result<String, String> {
         if let Some(session_data) = self.sessions.lock().await.get(session_id) {
             let pub_key = session_data.pub_key.clone();
@@ -1242,7 +1300,10 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                 if self.relay {
                     return Ok(None);
                 }
+                //self.added_emails.lock().await += 1337;
                 for message in msg.messages {
+                    let v = *self.added_emails.lock().await;
+                    *self.added_emails.lock().await = v + 1;
                     let _ = self.handle_message(message, topic, relay).await;
                 }
                 return Ok(None);
@@ -1251,12 +1312,13 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                 if !self.relay {
                     return Ok(None);
                 }
-                if let Some(messages) = relay.get_messages(&msg.session_id) {
-                    let topic = Topic::replay_topic(&session_id);
+                if let Some(messages) = relay.get_messages(&msg.key_id) {
+                    let topic = Topic::replay_response_topic(&msg.key_id);
                     return Ok(Some((
-                        Message::new_replay_response(session_id, messages),
+                        Message::new_replay_response(msg.key_id, messages),
                         topic,
                     )));
+                } else {
                 }
                 return Ok(None);
             }
@@ -1374,6 +1436,9 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                     }
                 }
 
+                if self.relay {
+                    return Ok(None);
+                }
                 let signature = msg.signature.clone();
                 let challenge = msg.challenge.clone();
 
@@ -1543,6 +1608,12 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                 let challenge_sig = msg.challenge_sig.clone();
                 let sym_key_encrypted = msg.sym_key_encrypted.clone();
 
+                if self.relay {
+                    relay.register_participant(&msg.pub_key, &session_id);
+                    relay.register_participant(&msg.orig_pub_key, &session_id);
+                    return Ok(None);
+                }
+
                 let sym_key = match self.host_encro.lock().await.decrypt(&sym_key_encrypted) {
                     Ok(res) => res,
                     Err(_) => {
@@ -1662,9 +1733,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                             .await
                             .add_entry_message(&session_id.clone(), incoming_message.clone());
                     }
-                    let msg = Message::new_replay(session_id.to_string());
-                    let topic = Topic::replay_topic(&session_id);
-                    return Ok(Some((msg, topic)));
+                    return Ok(None);
                 } else if self.memory.lock().await.in_memory(&session_id) {
                     let _ = self
                         .memory
@@ -1678,6 +1747,23 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                         message: "Invalid public key".to_owned(),
                     });
                 }
+            }
+            EncryptedRelay(msg) => {
+                if self.relay {
+                    let msg = Message {
+                        message: MessageData::Encrypted(EncryptedMsg { data: msg.data }),
+                        session_id: session_id.to_string(),
+                    };
+                    if let Some(messages_in_session) = relay.put_message(session_id.clone(), msg) {
+                        println!(
+                            "session {} has {} messages in memory",
+                            session_id, messages_in_session
+                        );
+                    } else {
+                        println!("failed to add message to session {}", session_id);
+                    }
+                }
+                return Ok(None);
             }
             Encrypted(msg) => {
                 let session_key_old = self.memory.lock().await.get_encrypted_sym_key(&session_id);
@@ -1738,6 +1824,27 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                         message: "Failed to decrypt message".to_owned(),
                     });
                 }
+            }
+            Email(msg) => {
+                let session_id = msg.session_id.clone();
+                if self.relay {
+                    /*
+                    if let Some(messages_in_session) = relay.put_message(session_id.clone(), msg) {
+                        println!(
+                            "session {} has {} messages in memory",
+                            session_id, messages_in_session
+                        );
+                    } else {
+                        println!("failed to add message to session {}", session_id);
+                    }*/
+                } else {
+                    // Store this in memory if it exists
+                    if self.memory.lock().await.in_memory(&session_id) {
+                        self.inbox.lock().await.add_entry(msg.clone());
+                        let _ = self.inbox.lock().await.to_file();
+                    }
+                }
+                Ok(None)
             }
             _ => {
                 // Do something
@@ -1881,6 +1988,54 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
     ) -> Result<(String, Vec<SessionLogMessage>), ()> {
         self.memory.lock().await.get_session_log(session_id)
     }
+    pub async fn send_email<T: MessagebleTopicAsync + MessagebleTopicAsyncReadTimeout>(
+        &self,
+        session_id: &str,
+        message: String,
+        gateway: &T,
+    ) -> Result<(), ()> {
+        let topic = Topic::email_topic(&session_id);
+        let session_key_old = self.memory.lock().await.get_encrypted_sym_key(&session_id);
+        if session_key_old.is_ok() {
+            // decrypt the encrypted symmetrical key
+            let session_key_old = session_key_old.unwrap();
+            let sym_key = self.decrypt_encrypted_str(session_key_old).await;
+            if sym_key.is_ok() {
+                let sym_key = sym_key.unwrap();
+                let cipher = ChaCha20Poly1305EnDeCrypt::new_from_str(&sym_key);
+
+                let email = EmailMsg {
+                    session_id: session_id.to_owned(),
+                    sender: self.get_userid().await,
+                    message: message.clone(),
+                    date_time: get_current_datetime(),
+                };
+                let msg = Message {
+                    message: MessageData::Email(email),
+                    session_id: session_id.to_string(),
+                };
+                let email_ser = msg.serialize().unwrap();
+
+                let msg_encrypted = match cipher.encrypt(&email_ser) {
+                    Ok(m) => m,
+                    Err(_) => {
+                        return Err(());
+                    }
+                };
+                let msg = Message {
+                    message: MessageData::EncryptedRelay(EncryptedRelayMsg {
+                        data: msg_encrypted,
+                    }),
+                    session_id: session_id.to_string(),
+                };
+                match gateway.send_message(&topic, msg).await {
+                    Ok(_) => {}
+                    Err(_error) => return Err(()),
+                };
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone)]
@@ -1892,6 +2047,7 @@ struct SessionRelayEntry {
 #[derive(Clone)]
 struct SessionRelay {
     pub memory: HashMap<String, SessionRelayEntry>,
+    pub keys_to_sessions: HashMap<String, Vec<String>>,
     pub max_sessions: usize,
     pub max_messages: usize,
 }
@@ -1917,21 +2073,31 @@ impl SessionRelay {
     pub fn new(max_sessions: usize, max_messages: usize) -> Self {
         Self {
             memory: HashMap::new(),
+            keys_to_sessions: HashMap::new(),
             max_messages,
             max_sessions,
         }
     }
-    pub fn get_messages(&self, session_id: &str) -> Option<Vec<Message>> {
-        match self.memory.get(session_id) {
-            Some(memory) => {
-                let buffer = memory.buffer.clone();
-                let mut messages = Vec::new();
-                for i in 0..buffer.len() {
-                    messages.push(buffer.get(i).unwrap().clone());
+    pub fn get_messages(&self, key_id: &str) -> Option<Vec<Message>> {
+        let mut messages = Vec::new();
+        for session_id in self.get_participant_session_ids(key_id) {
+            match self.memory.get(&session_id) {
+                Some(memory) => {
+                    let buffer = memory.buffer.clone();
+                    for i in 0..buffer.len() {
+                        messages.push(buffer.get(i).unwrap().clone());
+                    }
                 }
-                Some(messages)
+                None => {
+                    println!("Did not find for {}", session_id);
+                }
             }
-            None => None,
+        }
+        if messages.len() == 0 {
+            println!("no matching session ids to key: {}", key_id);
+            None
+        } else {
+            Some(messages)
         }
     }
     pub fn put_message(&mut self, session_id: String, message: Message) -> Option<usize> {
@@ -1943,7 +2109,8 @@ impl SessionRelay {
                         self.remove_entry(&session_id_newest);
                     }
                 }
-                let entry = SessionRelayEntry::new(self.max_messages);
+                let mut entry = SessionRelayEntry::new(self.max_messages);
+                entry.push(message);
                 self.memory.insert(session_id, entry);
                 return Some(1);
             }
@@ -1961,5 +2128,43 @@ impl SessionRelay {
     }
     pub fn remove_entry(&mut self, session_id: &str) {
         self.memory.remove(session_id);
+    }
+    pub fn get_participant_session_ids(&self, key: &str) -> Vec<String> {
+        match self.keys_to_sessions.get(key) {
+            Some(ids) => {
+                return ids.clone();
+            }
+            None => {
+                return Vec::new();
+            }
+        }
+    }
+    pub fn register_participant(&mut self, key: &str, session_id: &str) {
+        let pub_key_decoded = match base64::decode(key) {
+            Err(_) => {
+                return;
+            }
+            Ok(pub_key) => pub_key,
+        };
+        match PGPEnCryptOwned::new_from_vec(&pub_key_decoded) {
+            Ok(pub_encro) => {
+                let key = pub_encro.get_public_key_fingerprint();
+                match self.keys_to_sessions.get_mut(&key) {
+                    Some(ids) => {
+                        if ids.contains(&session_id.to_string()) {
+                            ids.push(session_id.to_string());
+                        }
+                    }
+                    None => {
+                        let mut vec = Vec::new();
+                        vec.push(session_id.to_string());
+                        self.keys_to_sessions.insert(key.to_string(), vec);
+                    }
+                }
+            }
+            Err(_) => {
+                return;
+            }
+        }
     }
 }

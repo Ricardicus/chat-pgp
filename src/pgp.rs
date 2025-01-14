@@ -47,6 +47,17 @@ pub mod pgp {
         Ok(rsa_cert)
     }
 
+    pub fn generate_new_key_with(email: String) -> Result<openpgp::Cert, String> {
+        let res = CertBuilder::general_purpose(None, Some(email))
+            .set_cipher_suite(CipherSuite::RSA2k)
+            .generate();
+        if res.is_err() {
+            return Err("Failed to generate a new key".to_string());
+        }
+        let (rsa_cert, _) = res.unwrap();
+        Ok(rsa_cert)
+    }
+
     pub fn read_from_gpg(gpgkey: &str, passphrase: Option<&str>) -> Result<openpgp::Cert, String> {
         let res = match passphrase {
             Some(pass) => execute_command(&format!(

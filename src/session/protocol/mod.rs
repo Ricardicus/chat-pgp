@@ -9,6 +9,8 @@ pub enum Topic {
     Close,
     Heartbeat,
     Replay,
+    ReplayResponse,
+    Email,
 }
 
 impl Topic {
@@ -23,6 +25,8 @@ impl Topic {
             Topic::Close => "v1/session/close",
             Topic::Heartbeat => "v1/session/heartbeat",
             Topic::Replay => "v1/session/replay",
+            Topic::ReplayResponse => "v1/session/replay-response",
+            Topic::Email => "v1/email",
         }
     }
     pub fn to_string(&self) -> String {
@@ -35,6 +39,12 @@ impl Topic {
     }
     pub fn reply_suffix() -> &'static str {
         "/reply"
+    }
+    pub fn email_topic(session_id: &str) -> String {
+        let mut t = Topic::Email.as_str().to_string();
+        t.push_str("/");
+        t.push_str(session_id);
+        t
     }
     pub fn messaging_topic_in(fingerprint: &str) -> String {
         let mut t = Topic::Message.as_str().to_string();
@@ -55,10 +65,16 @@ impl Topic {
         t.push_str(fingerprint);
         t
     }
-    pub fn replay_topic(session_id: &str) -> String {
+    pub fn replay_topic(key: &str) -> String {
         let mut t = Topic::Replay.as_str().to_string();
         t.push_str("/");
-        t.push_str(session_id);
+        t.push_str(key);
+        t
+    }
+    pub fn replay_response_topic(key: &str) -> String {
+        let mut t = Topic::ReplayResponse.as_str().to_string();
+        t.push_str("/");
+        t.push_str(key);
         t
     }
     pub fn heartbeat_topic(fingerprint: &str) -> String {
