@@ -1,5 +1,6 @@
 use rand::distributions::Alphanumeric;
 use rand::{thread_rng, Rng};
+use serde::{Deserialize, Serialize};
 use std::process::Command;
 
 extern crate base64;
@@ -63,4 +64,64 @@ pub fn generate_random_string(length: usize) -> String {
         .map(|_| rng.sample(Alphanumeric) as char)
         .collect();
     random_string
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RingBuffer<T> {
+    buffer: Vec<T>,
+    capacity: usize,
+    start: usize,
+    end: usize,
+    is_full: bool,
+}
+
+impl<T> RingBuffer<T> {
+    /// Creates a new `RingBuffer` with the specified capacity.
+    pub fn new(capacity: usize) -> Self {
+        assert!(capacity > 0, "Capacity must be greater than 0");
+        Self {
+            buffer: Vec::with_capacity(capacity),
+            capacity,
+            start: 0,
+            end: 0,
+            is_full: false,
+        }
+    }
+
+    /// Retrieves the element at the logical index `index` in the ring buffer.
+    pub fn get(&self, index: usize) -> Option<&T> {
+        if index >= self.len() {
+            None
+        } else {
+            let physical_index = (self.start + index) % self.capacity;
+            self.buffer.get(physical_index)
+        }
+    }
+
+    /// Pushes an item into the ring buffer. Overwrites the oldest item if the buffer is full.
+    pub fn push(&mut self, item: T) {
+        if self.buffer.len() < self.capacity {
+            self.buffer.push(item);
+        } else {
+            self.buffer[self.end] = item;
+        }
+
+        self.end = (self.end + 1) % self.capacity;
+        if self.is_full {
+            self.start = (self.start + 1) % self.capacity; // Overwrite oldest element
+        } else if self.end == self.start {
+            self.is_full = true;
+        }
+    }
+
+    /// Returns the number of elements in the ring buffer.
+    pub fn len(&self) -> usize {
+        if self.is_full {
+            self.capacity
+        } else if self.end >= self.start {
+            self.end - self.start
+        } else {
+            self.capacity - (self.start - self.end)
+        }
+    }
 }

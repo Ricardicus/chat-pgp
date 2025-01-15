@@ -458,6 +458,11 @@ impl App {
         state.character_index = 0;
     }
 
+    async fn reset_cursor_vertical(&mut self) {
+        let mut state = self.state.lock().await;
+        state.character_indexy = 0;
+    }
+
     async fn submit_message(&mut self) {
         let input;
         {
@@ -466,6 +471,7 @@ impl App {
             state.input = String::new();
         }
         self.reset_cursor_horizontal().await;
+        self.reset_cursor_vertical().await;
         self.set_input_mode(InputMode::Normal).await;
         let _ = self
             .tx
@@ -577,9 +583,21 @@ impl App {
     }
     async fn write_new_message(&mut self, cmd: PrintCommand) {
         let mut state = self.state.lock().await;
-        let mut v = Vec::new();
-        v.push(cmd);
-        state.messages.push(v);
+        let lines = cmd
+            .message
+            .lines() // Split the message into lines
+            .map(|line| PrintCommand {
+                window: cmd.window,
+                message: line.to_string(),
+                style: cmd.style.clone(),
+                color: cmd.color.clone(),
+            })
+            .collect::<Vec<PrintCommand>>();
+        for line in lines {
+            let mut v = Vec::new();
+            v.push(line);
+            state.messages.push(v);
+        }
         state.scrollstate_commands = state
             .scrollstate_commands
             .content_length(state.messages.len());
@@ -780,6 +798,13 @@ impl App {
                     }
                     match input_mode {
                         InputMode::Normal => match key.code {
+                            KeyCode::Char('s') => match app_state {
+                                AppCurrentState::Request => {
+                                    app.submit_message().await;
+                                    app.set_app_state(AppCurrentState::Commands).await;
+                                }
+                                _ => {}
+                            },
                             KeyCode::Char(' ') => {
                                 app.set_input_mode(InputMode::Editing).await;
                             }
@@ -871,7 +896,10 @@ impl App {
                     "q".bold(),
                     " to exit, ".into(),
                     "Space".bold(),
-                    " to write".into(),
+                    " to write. ".into(),
+                    "Press ".into(),
+                    "s".bold(),
+                    " to send.".into(),
                 ],
                 Style::default().add_modifier(Modifier::RAPID_BLINK),
             ),

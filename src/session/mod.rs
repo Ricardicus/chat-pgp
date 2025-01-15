@@ -1,5 +1,8 @@
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fs::File;
+use std::io::{self, Read, Write};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -14,7 +17,7 @@ pub mod middleware;
 pub mod protocol;
 
 use crate::pgp::pgp::read_from_vec;
-use crate::util::get_current_datetime;
+use crate::util::{get_current_datetime, RingBuffer};
 use async_recursion::async_recursion;
 use crypto::{
     sha256sum, ChaCha20Poly1305EnDeCrypt, Cryptical, CrypticalDecrypt, CrypticalEncrypt,
@@ -37,7 +40,6 @@ use messages::{
 };
 use middleware::ZenohHandler;
 use protocol::*;
-use ringbuffer::{AllocRingBuffer, RingBuffer};
 use zenoh::Config;
 
 #[derive(PartialEq, Clone)]
@@ -1000,9 +1002,13 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
             self.launch_replay_request(responder.clone()).await;
         }
         let keep_running = self.running.clone();
-        let mut relay = SessionRelay::new(54, 124);
+        let relay_file = ".relay".to_string();
+        let mut relay = SessionRelay::from_file(&relay_file)
+            .unwrap_or_else(|_| SessionRelay::new(relay_file, 54, 124));
+        let duration_wait = 60;
+        let mut relay_last_stored = Utc::now();
         while *keep_running.lock().await {
-            let timeout_duration = Duration::from_secs(5);
+            let timeout_duration = Duration::from_secs(duration_wait);
             let received = match timeout(timeout_duration, self.rx.lock().await.recv()).await {
                 Ok(Some(received)) => Some(received),
                 Ok(None) => None,
@@ -1011,17 +1017,25 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                     None
                 }
             };
-            if received.is_none() {
-                continue;
+            if self.relay {
+                // check if we want to store the relay
+                if relay_last_stored < relay.last_active
+                    && (relay.last_active - relay_last_stored).num_seconds().abs() > 60
+                {
+                    println!("storing to file..");
+                    let _ = relay.to_file();
+                    relay_last_stored = relay.last_active;
+                }
+                if received.is_none() {
+                    continue;
+                }
             }
+
             let received = received.unwrap();
             let topic = received.0;
             let mut topic_error = Topic::Errors.as_str().to_string();
             topic_error.push_str("/");
             topic_error.push_str(&identifier);
-            if self.relay {
-                println!("Received {}", &topic);
-            }
             let _msg = match Message::deserialize(&received.1) {
                 Ok(msg) => {
                     let session_id = msg.session_id.clone();
@@ -1753,8 +1767,10 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                     };
                     if let Some(messages_in_session) = relay.put_message(session_id.clone(), msg) {
                         println!(
-                            "session {} has {} messages in memory",
-                            session_id, messages_in_session
+                            "{} session {} has {} messages in memory",
+                            get_current_datetime(),
+                            session_id,
+                            messages_in_session
                         );
                     } else {
                         println!("failed to add message to session {}", session_id);
@@ -2038,24 +2054,26 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
     }
 }
 
-#[derive(Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SessionRelayEntry {
-    pub buffer: AllocRingBuffer<Message>,
+    pub buffer: RingBuffer<Message>,
     pub last_active: DateTime<Utc>,
 }
 
-#[derive(Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SessionRelay {
     pub memory: HashMap<String, SessionRelayEntry>,
     pub keys_to_sessions: HashMap<String, Vec<String>>,
     pub max_sessions: usize,
     pub max_messages: usize,
+    pub file: String,
+    pub last_active: DateTime<Utc>,
 }
 
 impl SessionRelayEntry {
     pub fn new(max_messages: usize) -> Self {
         Self {
-            buffer: AllocRingBuffer::new(max_messages),
+            buffer: RingBuffer::new(max_messages),
             last_active: Utc::now(),
         }
     }
@@ -2070,13 +2088,35 @@ impl SessionRelayEntry {
 }
 
 impl SessionRelay {
-    pub fn new(max_sessions: usize, max_messages: usize) -> Self {
+    pub fn new(file: String, max_sessions: usize, max_messages: usize) -> Self {
         Self {
+            file,
             memory: HashMap::new(),
             keys_to_sessions: HashMap::new(),
             max_messages,
             max_sessions,
+            last_active: Utc::now(),
         }
+    }
+    /// Serializes the Memory struct to an array of bytes using CBOR.
+    fn serialize(&self) -> Vec<u8> {
+        serde_cbor::to_vec(&self).expect("Failed to serialize Memory")
+    }
+    /// Reads the serialized content from a file at the given path and deserializes it into a Memory struct.
+    pub fn from_file(path: &str) -> io::Result<Self> {
+        let mut file = File::open(path)?;
+        let mut buffer = Vec::new();
+        file.read_to_end(&mut buffer)?;
+        let relay: SessionRelay =
+            serde_cbor::from_slice(&buffer).expect("Failed to deserialize Memory");
+        Ok(relay)
+    }
+    /// Writes the serialized content of Memory to a file at the given path.
+    pub fn to_file(&self) -> io::Result<()> {
+        let serialized = self.serialize();
+        let mut file = File::create(&self.file)?;
+        file.write_all(&serialized)?;
+        Ok(())
     }
     pub fn get_messages(&self, key_id: &str) -> Option<Vec<Message>> {
         let mut messages = Vec::new();
@@ -2088,19 +2128,17 @@ impl SessionRelay {
                         messages.push(buffer.get(i).unwrap().clone());
                     }
                 }
-                None => {
-                    println!("Did not find for {}", session_id);
-                }
+                None => {}
             }
         }
         if messages.len() == 0 {
-            println!("no matching session ids to key: {}", key_id);
             None
         } else {
             Some(messages)
         }
     }
     pub fn put_message(&mut self, session_id: String, message: Message) -> Option<usize> {
+        self.last_active = Utc::now();
         match self.memory.get_mut(&session_id) {
             Some(memory) => Some(memory.push(message)),
             None => {

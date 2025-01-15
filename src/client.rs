@@ -37,8 +37,8 @@ use ncurses::*;
 mod terminal;
 use terminal::{
     format_chat_msg, AppCurrentState, ChatClosedCommand, PrintChatCommand, PrintCommand,
-    SetAppStateCommand, SetChatMessagesCommand, TextColor, TextStyle, WindowCommand, WindowManager,
-    WindowPipe,
+    RequestCommand, SetAppStateCommand, SetChatMessagesCommand, TextColor, TextStyle,
+    WindowCommand, WindowManager, WindowPipe,
 };
 
 #[derive(Parser)]
@@ -387,7 +387,13 @@ impl InputCommand {
         prompt: &str,
         rx: &mut mpsc::Receiver<Option<WindowCommand>>,
     ) -> Result<String, ()> {
-        println_message_style(1, prompt.to_string(), TextStyle::Bold, TextColor::Green).await;
+        PIPE.get()
+            .unwrap()
+            .send(WindowCommand::Request(RequestCommand {
+                message: prompt.into(),
+                style: TextStyle::Bold,
+            }))
+            .await;
         let input = rx.recv().await;
         if input.is_some() {
             let input = input.unwrap();
@@ -1108,7 +1114,7 @@ async fn launch_terminal_program(
                         if r.is_ok() && r.unwrap() {
                             let session_id = peer_to_session_id.get(peer).unwrap();
                             let content =
-                                InputCommand::read_incoming("Write email content", &mut rx).await;
+                                InputCommand::read_incoming(" Write email content ", &mut rx).await;
                             if content.is_ok() {
                                 let content = content.unwrap();
                                 println_message_str(1, "Sending message...").await;
@@ -1235,6 +1241,7 @@ async fn launch_terminal_program(
                             )
                             .await;
                             println_message_str(1, "").await;
+                            println_message_str(1, "").await;
                             println_message_style(
                                 1,
                                 entry.message.message.clone(),
@@ -1245,7 +1252,7 @@ async fn launch_terminal_program(
                         } else {
                             println_message_style(
                                 1,
-                                format!("There is no entry nbr {} in the inbox.", cmd.entry),
+                                format!("There is no entry of that number in the inbox."),
                                 TextStyle::Italic,
                                 TextColor::DarkGray,
                             )
