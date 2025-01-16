@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::File;
@@ -553,6 +554,10 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
 
     pub async fn inbox_get_sender_session_ids(&self, sender: String) -> Result<Vec<String>, ()> {
         self.inbox.lock().await.get_sender_session_ids(sender)
+    }
+
+    pub async fn inbox_mark_as_read(&mut self, id: &str) -> bool {
+        self.inbox.lock().await.mark_as_read(id)
     }
 
     pub async fn inbox_get_senders(&self) -> Vec<String> {
@@ -2004,6 +2009,18 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
     ) -> Result<(String, Vec<SessionLogMessage>), ()> {
         self.memory.lock().await.get_session_log(session_id)
     }
+
+    fn extract_subject(content: &str) -> String {
+        let subject_regex = Regex::new(r"(?i)subject:\s*(.*)").unwrap(); // (?i) makes it case-insensitive
+        if let Some(captures) = subject_regex.captures(content) {
+            captures
+                .get(1) // Get the first capturing group, which is the "[the rest of the line]"
+                .map_or("No subject".to_string(), |m| m.as_str().to_string())
+        } else {
+            "No subject".to_string()
+        }
+    }
+
     pub async fn send_email<T: MessagebleTopicAsync + MessagebleTopicAsyncReadTimeout>(
         &self,
         session_id: &str,
@@ -2012,6 +2029,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
     ) -> Result<(), ()> {
         let topic = Topic::email_topic(&session_id);
         let session_key_old = self.memory.lock().await.get_encrypted_sym_key(&session_id);
+        let subject = Self::extract_subject(&message);
         if session_key_old.is_ok() {
             // decrypt the encrypted symmetrical key
             let session_key_old = session_key_old.unwrap();
@@ -2024,6 +2042,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                     session_id: session_id.to_owned(),
                     sender: self.get_userid().await,
                     message: message.clone(),
+                    subject: subject.clone(),
                     date_time: get_current_datetime(),
                 };
                 let msg = Message {

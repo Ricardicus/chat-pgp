@@ -40,6 +40,16 @@ impl Inbox {
         }
     }
 
+    /// Marks an entry as read by its ID. Returns `true` if successful, `false` if no entry with the given ID exists.
+    pub fn mark_as_read(&mut self, id: &str) -> bool {
+        if let Some(entry) = self.entries.iter_mut().find(|e| e.id == id) {
+            entry.read = true;
+            true
+        } else {
+            false
+        }
+    }
+
     /// Serializes the Memory struct to an array of bytes using CBOR.
     fn serialize(&self) -> Vec<u8> {
         serde_cbor::to_vec(&self).expect("Failed to serialize Memory")

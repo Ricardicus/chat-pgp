@@ -96,6 +96,7 @@ pub struct EncryptedRelayMsg {
 pub struct EmailMsg {
     pub session_id: String,
     pub sender: String,
+    pub subject: String,
     pub message: String,
     pub date_time: String,
 }
@@ -104,6 +105,7 @@ impl EmailMsg {
     pub fn get_id(&self) -> String {
         let mut s = String::new();
         s.push_str(&self.session_id);
+        s.push_str(&self.subject);
         s.push_str(&self.sender);
         s.push_str(&self.message);
         s.push_str(&self.date_time);
@@ -346,11 +348,12 @@ impl SessionMessage {
         }
     }
 
-    pub fn new_email(session_id: String, sender: String, message: String) -> Self {
+    pub fn new_email(session_id: String, sender: String, subject: String, message: String) -> Self {
         SessionMessage {
             message: MessageData::Email(EmailMsg {
                 message,
                 sender,
+                subject,
                 session_id,
                 date_time: get_current_datetime(),
             }),

@@ -8,7 +8,7 @@ use crate::util::{get_current_datetime, short_fingerprint};
 use color_eyre::Result;
 use ratatui::{
     crossterm::event::{self, Event, KeyCode, KeyEventKind},
-    layout::{Constraint, Layout, Position},
+    layout::{Constraint, Flex, Layout, Position, Rect},
     prelude::Margin,
     style::{Color, Modifier, Style, Stylize},
     text::{Line, Span, Text},
@@ -877,6 +877,14 @@ impl App {
         h3.await.unwrap();
     }
 
+    fn center(area: Rect, horizontal: Constraint, vertical: Constraint) -> Rect {
+        let [area] = Layout::horizontal([horizontal])
+            .flex(Flex::Center)
+            .areas(area);
+        let [area] = Layout::vertical([vertical]).flex(Flex::Center).areas(area);
+        area
+    }
+
     fn draw_request(frame: &mut Frame, state: &mut AppState) {
         let _messages = &state.messages;
         let input = &state.input;
@@ -886,15 +894,19 @@ impl App {
         let character_indexy = state.character_indexy;
         let _chat_messages = &state.chat_messages;
         let _chatid = &state.chatid;
-        let vertical = Layout::vertical([Constraint::Length(1), Constraint::Min(4)]);
-        let [help_area, input_area] = vertical.areas(frame.area());
+        let vertical = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(4),
+        ]);
+        let [help_area, help_text_area, input_area] = vertical.areas(frame.area());
 
         let (msg, style) = match input_mode {
             InputMode::Normal => (
                 vec![
                     "Press ".into(),
                     "q".bold(),
-                    " to exit, ".into(),
+                    " to exit without sending the email, ".into(),
                     "Space".bold(),
                     " to write. ".into(),
                     "Press ".into(),
@@ -915,8 +927,22 @@ impl App {
             ),
         };
         let text = Text::from(Line::from(msg)).patch_style(style);
-        let help_message = Paragraph::new(text);
-        frame.render_widget(help_message, help_area);
+        let help_message = Paragraph::new(text.clone());
+        let area = Self::center(
+            help_area,
+            Constraint::Length(text.clone().width() as u16),
+            Constraint::Length(1),
+        );
+        frame.render_widget(help_message, area);
+
+        let text = Text::from(Line::from("To give the email a subject title, write: 'Subject: ' and you title following there somewhere in the mail.")).patch_style(Style::default().add_modifier(Modifier::ITALIC).dark_gray());
+        let help_message = Paragraph::new(text.clone());
+        let area = Self::center(
+            help_text_area,
+            Constraint::Length(text.clone().width() as u16),
+            Constraint::Length(1),
+        );
+        frame.render_widget(help_message, area);
 
         let input = Paragraph::new(input.as_str())
             .style(match input_mode {
@@ -978,8 +1004,14 @@ impl App {
             ),
         };
         let text = Text::from(Line::from(msg)).patch_style(style);
-        let help_message = Paragraph::new(text);
-        frame.render_widget(help_message, help_area);
+        let help_message = Paragraph::new(text.clone());
+        let area = Self::center(
+            help_area,
+            Constraint::Length(text.clone().width() as u16),
+            Constraint::Length(1),
+        );
+
+        frame.render_widget(help_message, area);
 
         let input = Paragraph::new(input.as_str())
             .style(match input_mode {

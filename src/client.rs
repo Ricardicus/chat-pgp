@@ -641,14 +641,23 @@ async fn launch_terminal_program(
     for uid in cert.userids() {
         userid.push_str(&uid.userid().to_string());
     }
-    // Serve incoming commands
-    println_message_style(
-        1,
-        format!("Welcome to Chat-PGP"),
-        TextStyle::Bold,
-        TextColor::Green,
-    )
-    .await;
+
+    let s = "\
+. __      __       .__                                  __           \n\
+./  \\    /  \\ ____ |  |   ____  ____   _____   ____   _/  |_  ____  \n\
+.\\   \\/\\/   // __ \\|  | _/ ___\\/  _ \\ /     \\_/ __ \\  \\   __\\/  _ \\  \n\
+. \\        /\\  ___/|  |_\\  \\__(  <_> )  Y Y  \\  ___/   |  | (  <_> ) \n\
+.  \\__/\\  /  \\___  >____/\\___  >____/|__|_|  /\\___  >  |__|  \\____/  \n\
+._______\\/ .__   \\/       __ \\/        ____\\/____ \\/________________ \n\
+.\\_   ___ \\|  |__ _____ _/  |_         \\______   \\/  _____|______   \\\n\
+./    \\  \\/|  |  \\\\__  \\\\   __\\  ______ |     ___/   \\  ___|     ___/\n\
+.\\     \\___|   Y  \\/ __ \\|  |   /_____/ |    |   \\    \\_\\  \\    |    \n\
+. \\______  /___|  (____  /__|           |____|    \\______  /____|    \n\
+.        \\/     \\/     \\/                                \\/         ";
+    for line in s.lines() {
+        // Serve incoming commands
+        println_message_style(1, line.into(), TextStyle::Bold, TextColor::Green).await;
+    }
     println_message_style(
         1,
         format!("Using key {} {}", &cert.fingerprint(), userid),
@@ -1154,10 +1163,11 @@ async fn launch_terminal_program(
                                     println_message_style(
                                         1,
                                         format!(
-                                            "{}. {} {}",
+                                            "{}. {} from {} - {}",
                                             index + 1,
                                             inbox_entry.message.date_time,
-                                            inbox_entry.message.sender
+                                            inbox_entry.message.sender,
+                                            inbox_entry.message.subject
                                         ),
                                         TextStyle::Normal,
                                         TextColor::White,
@@ -1167,10 +1177,11 @@ async fn launch_terminal_program(
                                     println_message_style(
                                         1,
                                         format!(
-                                            "{}. {} {}",
+                                            "{}. {} from {} - {}",
                                             index + 1,
                                             inbox_entry.message.date_time,
-                                            inbox_entry.message.sender
+                                            inbox_entry.message.sender,
+                                            inbox_entry.message.subject
                                         ),
                                         TextStyle::Bold,
                                         TextColor::White,
@@ -1225,6 +1236,7 @@ async fn launch_terminal_program(
                         let entry = session.inbox_get_entry(cmd.entry).await;
                         if entry.is_ok() {
                             let entry = entry.unwrap();
+                            let entry_id = entry.id;
                             println_message_str(1, "").await;
                             println_message_style(
                                 1,
@@ -1240,6 +1252,13 @@ async fn launch_terminal_program(
                                 TextColor::DarkGray,
                             )
                             .await;
+                            println_message_style(
+                                1,
+                                format!("Subject: {}", entry.message.subject),
+                                TextStyle::Normal,
+                                TextColor::DarkGray,
+                            )
+                            .await;
                             println_message_str(1, "").await;
                             println_message_str(1, "").await;
                             println_message_style(
@@ -1249,6 +1268,7 @@ async fn launch_terminal_program(
                                 TextColor::White,
                             )
                             .await;
+                            session.inbox_mark_as_read(&entry_id).await;
                         } else {
                             println_message_style(
                                 1,
