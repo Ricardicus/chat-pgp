@@ -1031,9 +1031,10 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                     let _ = relay.to_file();
                     relay_last_stored = relay.last_active;
                 }
-                if received.is_none() {
-                    continue;
-                }
+            }
+
+            if received.is_none() {
+                continue;
             }
 
             let received = received.unwrap();
