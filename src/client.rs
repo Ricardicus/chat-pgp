@@ -366,7 +366,7 @@ impl InputCommand {
         prompt: &str,
         rx: &mut mpsc::Receiver<Option<WindowCommand>>,
     ) -> Result<bool, ()> {
-        println_message_str(1, prompt).await;
+        println_message_style(1, prompt.into(), TextStyle::Normal, TextColor::Green).await;
         let input = rx.recv().await;
         if input.is_some() {
             let input = input.unwrap();
@@ -771,14 +771,14 @@ async fn launch_terminal_program(
                     _ => {}
                 };
 
-                let mut s = ">> ".to_string();
                 let input = match input {
                     WindowCommand::Println(input) => input.message,
                     _ => "".into(),
                 };
                 if session.get_number_of_sessions().await == 0 {
-                    s.push_str(&input);
-                    println_message(1, s).await;
+                    println_message_style(1, ">> ".into(), TextStyle::Normal, TextColor::Green)
+                        .await;
+                    printf_message_style(1, input.clone(), TextStyle::Bold, TextColor::White).await;
                 }
                 let cmd = InputCommand::parse_from(&input);
                 match cmd {

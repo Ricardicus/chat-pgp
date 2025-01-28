@@ -35,9 +35,10 @@ use messages::MessageData::{
 use messages::MessagingError::*;
 use messages::SessionMessage as Message;
 use messages::{
-    ChatMsg, EmailMsg, EncryptedMsg, EncryptedRelayMsg, MessageData, MessageListener,
-    MessagebleTopicAsync, MessagebleTopicAsyncPublishReads, MessagebleTopicAsyncReadTimeout,
-    MessagingError, SessionErrorCodes, SessionErrorMsg,
+    ChatMsg, DiscoveryMsg, DiscoveryReplyMsg, EmailMsg, EncryptedMsg, EncryptedRelayMsg, InitMsg,
+    InitOkMsg, InternalMsg, MessageData, MessageListener, MessagebleTopicAsync,
+    MessagebleTopicAsyncPublishReads, MessagebleTopicAsyncReadTimeout, MessagingError,
+    SessionErrorCodes, SessionErrorMsg,
 };
 use middleware::ZenohHandler;
 use protocol::*;
@@ -1253,6 +1254,505 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
         }
     }
 
+    pub async fn handle_init_ok(
+        &mut self,
+        msg: InitOkMsg,
+        session_id: &str,
+        relay: &mut SessionRelay,
+    ) -> Result<Option<(Message, String)>, SessionErrorMsg> {
+        let challenge_sig = msg.challenge_sig.clone();
+        let sym_key_encrypted = msg.sym_key_encrypted.clone();
+
+        if self.relay {
+            relay.register_participant(&msg.pub_key, &session_id);
+            relay.register_participant(&msg.orig_pub_key, &session_id);
+            return Ok(None);
+        }
+
+        let sym_key = match self.host_encro.lock().await.decrypt(&sym_key_encrypted) {
+            Ok(res) => res,
+            Err(_) => {
+                return Err(SessionErrorMsg {
+                    code: SessionErrorCodes::InvalidPublicKey as u32,
+                    message: "Invalid session key".to_owned(),
+                });
+            }
+        };
+        let mut add_session = None;
+        let _this_pub_key = self.host_encro.lock().await.get_public_key_as_base64();
+        {
+            let pendings = self.requests_outgoing_initialization.lock().await;
+            let pub_key_dec = base64::decode(&msg.pub_key);
+            if pub_key_dec.is_err() {
+                return Ok(None);
+            }
+            let pub_key_dec = pub_key_dec.unwrap();
+            let cert = read_from_vec(&pub_key_dec);
+            if cert.is_err() {
+                return Err(SessionErrorMsg {
+                    code: SessionErrorCodes::InvalidPublicKey as u32,
+                    message: "Invalid key".to_owned(),
+                });
+            }
+            let cert = cert.unwrap();
+            let other_key_fingerprint = cert.fingerprint().to_string();
+
+            for (pending_fingerprint, pending_challenge) in pendings.iter() {
+                let pending_pub_key_fingerprint = pending_fingerprint.clone();
+                if other_key_fingerprint == pending_pub_key_fingerprint {
+                    // Add this to the sessions to add
+                    let verified = match PGPEnCryptOwned::new_from_vec(&pub_key_dec) {
+                        Ok(pub_encro) => {
+                            match pub_encro.verify(&challenge_sig, pending_challenge) {
+                                Ok(result) => result,
+                                Err(_) => false,
+                            }
+                        }
+                        _ => false,
+                    };
+                    if verified {
+                        add_session = Some(msg.pub_key.clone())
+                    }
+                }
+            }
+        }
+
+        if add_session.is_some() {
+            let add_session_pub_key = add_session.unwrap();
+            let pub_key_dec =
+                base64::decode(&add_session_pub_key).expect("Failed to decode pub_key");
+            let cert = read_from_vec(&pub_key_dec);
+            if cert.is_err() {
+                return Err(SessionErrorMsg {
+                    code: SessionErrorCodes::InvalidPublicKey as u32,
+                    message: "Invalid key".to_owned(),
+                });
+            }
+            let cipher = ChaCha20Poly1305EnDeCrypt::new_from_str(&sym_key);
+            let key = session_id;
+            let session_data = SessionData {
+                id: key.into(),
+                last_active: SystemTime::now(),
+                state: SessionState::Active,
+                messages: Vec::new(),
+                sym_encro: cipher,
+                sym_key_encrypted_host: sym_key_encrypted.clone(),
+                pub_key: add_session_pub_key.clone(),
+            };
+
+            let new_session_data = session_data.clone();
+            let new_session_id = session_data.id.clone();
+
+            {
+                let mut sessions = self.sessions.lock().await;
+                sessions.insert(new_session_id.clone(), new_session_data);
+                let mut others = Vec::new();
+                others.push(add_session_pub_key.clone());
+                if self.memory_active {
+                    self.memory.lock().await.new_entry(
+                        new_session_id.clone(),
+                        sym_key_encrypted.clone(),
+                        others,
+                    );
+                }
+            }
+
+            self.call_callbacks_init_accepted(&add_session_pub_key.clone())
+                .await;
+
+            self.chat(new_session_id.clone(), false, add_session_pub_key.clone())
+                .await;
+        }
+        Ok(None)
+    }
+
+    pub async fn handle_init(
+        &mut self,
+        msg: InitMsg,
+        session_id: &str,
+    ) -> Result<Option<(Message, String)>, SessionErrorMsg> {
+        {
+            if self.host_encro.lock().await.get_public_key_as_base64() == msg.pub_key {
+                return Ok(None);
+            }
+        }
+
+        if self.relay {
+            return Ok(None);
+        }
+        let signature = msg.signature.clone();
+        let challenge = msg.challenge.clone();
+
+        if challenge.len() != challenge_len() {
+            return Err(SessionErrorMsg {
+                code: SessionErrorCodes::Protocol as u32,
+                message: "Invalid challenge length".to_owned(),
+            });
+        }
+
+        let pub_key = msg.pub_key.clone();
+        let pub_key_decoded = match base64::decode(msg.pub_key) {
+            Err(_) => {
+                return Err(SessionErrorMsg {
+                    code: SessionErrorCodes::InvalidPublicKey as u32,
+                    message: "Invalid public key base64".to_owned(),
+                });
+            }
+            Ok(pub_key) => pub_key,
+        };
+        match PGPEnCryptOwned::new_from_vec(&pub_key_decoded) {
+            Ok(pub_encro) => {
+                {
+                    let other_key = pub_encro.get_public_key_fingerprint();
+
+                    if let Err(_s) = pub_encro.verify(&signature, &other_key) {
+                        let msg = Message::new_init_decline(
+                            pub_key.clone(),
+                            "Invalid signature".to_owned(),
+                        );
+                        let mut topic_response = Topic::Initialize.as_str().to_string();
+                        topic_response.push_str("/");
+                        topic_response.push_str(&pub_encro.get_public_key_fingerprint());
+                        return Ok(Some((msg, topic_response)));
+                    }
+                }
+
+                let pub_key = pub_encro.get_public_key_as_base64();
+
+                if self.relay {
+                    println!(
+                        "-- initmsg {} - session id: {}",
+                        pub_encro.get_public_key_fingerprint(),
+                        session_id
+                    );
+                }
+
+                let initialize_this = self.call_callbacks_init_incoming(&pub_key).await;
+                let this_pub_key = self.host_encro.lock().await.get_public_key_as_base64();
+                if initialize_this {
+                    {
+                        let sym_cipher = ChaCha20Poly1305EnDeCrypt::new();
+                        let sym_cipher_key = sym_cipher.get_public_key_as_base64();
+                        let sym_cipher_key_encrypted = match pub_encro.encrypt(&sym_cipher_key) {
+                            Ok(res) => res,
+                            Err(_) => {
+                                return Err(SessionErrorMsg {
+                                    code: SessionErrorCodes::Encryption as u32,
+                                    message: "Failed to encrypt session key".to_owned(),
+                                });
+                            }
+                        };
+                        let sym_cipher_key_encrypted_host =
+                            match self.host_encro.lock().await.encrypt(&sym_cipher_key) {
+                                Ok(res) => res,
+                                Err(_) => {
+                                    return Err(SessionErrorMsg {
+                                        code: SessionErrorCodes::Encryption as u32,
+                                        message: "Failed to encrypt session key".to_owned(),
+                                    });
+                                }
+                            };
+                        let pk_1 = pub_encro.get_public_key_fingerprint();
+                        let pk_2 = self.host_encro.lock().await.get_public_key_fingerprint();
+
+                        let s = pk_1.clone() + &pk_2;
+                        let key = sha256sum(&s);
+                        let pub_key = pub_encro.get_public_key_as_base64();
+
+                        let challenge_sig = match self.host_encro.lock().await.sign(&challenge) {
+                            Ok(s) => s,
+                            Err(_e) => {
+                                return Err(SessionErrorMsg {
+                                    code: SessionErrorCodes::Encryption as u32,
+                                    message: "Failed to create signature of challenge".to_owned(),
+                                });
+                            }
+                        };
+
+                        let session_data = SessionData {
+                            id: key.clone(),
+                            last_active: SystemTime::now(),
+                            state: SessionState::Initializing,
+                            pub_key: pub_key.clone(),
+                            messages: Vec::new(),
+                            sym_encro: sym_cipher,
+                            sym_key_encrypted_host: sym_cipher_key_encrypted_host.clone(),
+                        };
+                        let mut msg = Message::new_init_ok(
+                            sym_cipher_key_encrypted.clone(),
+                            this_pub_key.clone(),
+                            pub_encro.get_public_key_as_base64(),
+                            challenge_sig,
+                        );
+                        msg.session_id = key.clone();
+
+                        if self.memory_active {
+                            // Store conversation in memory
+                            let mut others = Vec::new();
+                            others.push(pub_encro.get_public_key_as_base64());
+
+                            self.memory.lock().await.new_entry(
+                                msg.session_id.clone(),
+                                sym_cipher_key_encrypted_host.clone(),
+                                others,
+                            );
+                        }
+
+                        let mut hm = self.requests_incoming_initialization.lock().await;
+                        let mut topic_response = Topic::Initialize.as_str().to_string();
+                        topic_response.push_str("/");
+                        topic_response.push_str(&pub_encro.get_public_key_fingerprint());
+                        hm.push((session_data, msg, topic_response));
+                    }
+                    let mut topic_response = Topic::Initialize.as_str().to_string();
+                    topic_response.push_str("/");
+                    topic_response.push_str(&pub_encro.get_public_key_fingerprint());
+                    let msg = Message::new_init_await(
+                        pub_encro.get_public_key_as_base64(),
+                        this_pub_key.clone(),
+                    );
+                    Ok(Some((msg, topic_response)))
+                } else {
+                    let mut topic_response = Topic::Initialize.as_str().to_string();
+                    topic_response.push_str("/");
+                    topic_response.push_str(&pub_encro.get_public_key_fingerprint());
+                    let msg = Message::new_init_decline(
+                        pub_encro.get_public_key_as_base64(),
+                        this_pub_key.clone(),
+                    );
+                    Ok(Some((msg, topic_response)))
+                }
+            }
+            Err(_) => Err(SessionErrorMsg {
+                code: SessionErrorCodes::InvalidPublicKey as u32,
+                message: "Invalid public key".to_owned(),
+            }),
+        }
+    }
+
+    pub async fn handle_discovery(
+        &mut self,
+        msg: DiscoveryMsg,
+        session_id: &str,
+        topic: &str,
+    ) -> Result<Option<(Message, String)>, SessionErrorMsg> {
+        let pub_key = msg.pub_key.clone();
+
+        if pub_key == self.host_encro.lock().await.get_public_key_as_base64() || self.relay {
+            return Ok(None);
+        }
+
+        let pub_key_dec = base64::decode(&pub_key);
+        if pub_key_dec.is_err() {
+            return Err(SessionErrorMsg {
+                code: SessionErrorCodes::InvalidPublicKey as u32,
+                message: "Invalid public key".to_owned(),
+            });
+        }
+        let pub_key_dec = pub_key_dec.unwrap();
+        let discovered_cert = read_from_vec(&pub_key_dec);
+        if discovered_cert.is_err() {
+            return Err(SessionErrorMsg {
+                code: SessionErrorCodes::InvalidPublicKey as u32,
+                message: "Invalid public key".to_owned(),
+            });
+        }
+        let discovered_cert = discovered_cert.unwrap();
+        let discovered_pub_key_fingerprint = discovered_cert.fingerprint().to_string();
+
+        let mut discovered;
+        {
+            discovered = self.discovered.lock().await;
+        }
+
+        let this_fingerprint;
+        {
+            this_fingerprint = Some(self.host_encro.lock().await.get_public_key_fingerprint());
+        }
+        let this_fingerprint = this_fingerprint.unwrap();
+
+        if discovered_pub_key_fingerprint != this_fingerprint
+            && !discovered.contains_key(&discovered_pub_key_fingerprint)
+        {
+            let not_ignore = self.call_callbacks_discovered(&pub_key).await;
+            if not_ignore {
+                discovered.insert(discovered_pub_key_fingerprint, pub_key);
+            }
+        }
+
+        let mut response =
+            Message::new_discovery_reply(self.host_encro.lock().await.get_public_key_as_base64());
+        response.session_id = session_id.into();
+        Ok(Some((response, topic.to_string())))
+    }
+
+    pub async fn handle_discovery_reply(
+        &mut self,
+        msg: DiscoveryReplyMsg,
+    ) -> Result<Option<(Message, String)>, SessionErrorMsg> {
+        let pub_key = msg.pub_key.clone();
+
+        if pub_key == self.host_encro.lock().await.get_public_key_as_base64() {
+            return Ok(None);
+        }
+
+        let pub_key_dec = base64::decode(&pub_key);
+        if pub_key_dec.is_err() {
+            return Err(SessionErrorMsg {
+                code: SessionErrorCodes::InvalidPublicKey as u32,
+                message: "Invalid public key".to_owned(),
+            });
+        }
+        let pub_key_dec = pub_key_dec.unwrap();
+        let discovered_cert = read_from_vec(&pub_key_dec);
+        if discovered_cert.is_err() {
+            return Err(SessionErrorMsg {
+                code: SessionErrorCodes::InvalidPublicKey as u32,
+                message: "Invalid public key".to_owned(),
+            });
+        }
+        let discovered_cert = discovered_cert.unwrap();
+        let discovered_pub_key_fingerprint = discovered_cert.fingerprint().to_string();
+
+        let mut discovered;
+        {
+            discovered = self.discovered.lock().await;
+        }
+
+        let this_fingerprint;
+        {
+            this_fingerprint = Some(self.host_encro.lock().await.get_public_key_fingerprint());
+        }
+        let this_fingerprint = this_fingerprint.unwrap();
+
+        if discovered_pub_key_fingerprint != this_fingerprint
+            && !discovered.contains_key(&discovered_pub_key_fingerprint)
+        {
+            let not_ignore = self.call_callbacks_discovered(&pub_key).await;
+            if not_ignore {
+                discovered.insert(discovered_pub_key_fingerprint, pub_key);
+            }
+        }
+
+        Ok(None)
+    }
+
+    pub async fn handle_encrypted(
+        &mut self,
+        msg: EncryptedMsg,
+        topic: &str,
+        session_id: &str,
+        relay: &mut SessionRelay,
+    ) -> Result<Option<(Message, String)>, SessionErrorMsg> {
+        let session_key_old = self.memory.lock().await.get_encrypted_sym_key(&session_id);
+        if session_key_old.is_ok() {
+            // decrypt the encrypted symmetrical key
+            let session_key_old = session_key_old.unwrap();
+            let sym_key = self.decrypt_encrypted_str(session_key_old).await;
+            if sym_key.is_ok() {
+                let sym_key = sym_key.unwrap();
+                let dec_msg = self
+                    .decrypt_sym_encrypted_msg(sym_key.clone(), msg.data.clone())
+                    .await;
+
+                if dec_msg.is_ok() {
+                    let dec_msg = dec_msg.unwrap();
+                    let _ = self.handle_message(dec_msg, topic, relay, true).await;
+                }
+            }
+        }
+
+        let dec_msg;
+        {
+            let sm = &self.sessions.lock().await;
+            let cipher = match sm.get(session_id) {
+                Some(m) => m.sym_encro.clone(),
+                None => {
+                    return Err(SessionErrorMsg {
+                        code: SessionErrorCodes::InvalidMessage as u32,
+                        message: "Invalid session id".to_owned(),
+                    });
+                }
+            };
+            let decrypted = match cipher.decrypt(&msg.data) {
+                Ok(res) => res,
+                Err(_) => {
+                    return Err(SessionErrorMsg {
+                        code: SessionErrorCodes::Encryption as u32,
+                        message: "Failed to decrypt message".to_owned(),
+                    });
+                }
+            };
+            dec_msg = Some(match Message::deserialize(&decrypted) {
+                Ok(m) => m,
+                Err(_) => {
+                    return Err(SessionErrorMsg {
+                        code: SessionErrorCodes::Serialization as u32,
+                        message: "Failed to parse message".to_owned(),
+                    });
+                }
+            });
+        }
+        if dec_msg.is_some() {
+            let dec_msg = dec_msg.unwrap();
+            self.handle_message(dec_msg, topic, relay, true).await
+        } else {
+            return Err(SessionErrorMsg {
+                code: SessionErrorCodes::Encryption as u32,
+                message: "Failed to decrypt message".to_owned(),
+            });
+        }
+    }
+
+    pub async fn handle_internal(
+        &mut self,
+        msg: InternalMsg,
+        topic: &str,
+        session_id: &str,
+    ) -> Result<Option<(Message, String)>, SessionErrorMsg> {
+        if topic == Topic::Internal.as_str() {
+            if session_id == "internal" && msg.message == "terminate" {
+                self.call_callbacks_terminate().await;
+                *self.running.lock().await = false;
+                return Ok(None);
+            }
+
+            let message = Message {
+                message: MessageData::Chat(ChatMsg {
+                    message: msg.message.to_string(),
+                    sender_userid: self.get_userid().await,
+                    sender_fingerprint: self.host_encro.lock().await.get_public_key_fingerprint(),
+                    date_time: get_current_datetime(),
+                }),
+                session_id: session_id.into(),
+            };
+            let msg_enc = self.encrypt_msg(&session_id, &message).await;
+            if msg_enc.is_ok() {
+                let msg_enc = msg_enc.unwrap();
+
+                let message = Message {
+                    message: MessageData::Encrypted(msg_enc),
+                    session_id: session_id.into(),
+                };
+                let topic_response = msg.topic;
+
+                let pk = self.host_encro.lock().await.get_public_key_as_base64();
+                self.call_callbacks_chat(&pk, &msg.message).await;
+                return Ok(Some((message, topic_response)));
+            } else {
+                return Err(SessionErrorMsg {
+                    code: SessionErrorCodes::Protocol as u32,
+                    message: "Session not found".to_owned(),
+                });
+            }
+        } else {
+            return Err(SessionErrorMsg {
+                code: SessionErrorCodes::Protocol as u32,
+                message: "Invalid internal message topic".to_owned(),
+            });
+        }
+    }
+
     #[async_recursion]
     pub async fn handle_message(
         &mut self,
@@ -1261,7 +1761,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
         relay: &mut SessionRelay,
         has_been_decypted: bool,
     ) -> Result<Option<(Message, String)>, SessionErrorMsg> {
-        let mut topic_response = topic.to_string();
+        let topic_response = topic.to_string();
         let mut response = Message::new_discovery("Hello world".to_string());
         response.session_id = message.session_id.clone();
         let session_id = message.session_id.clone();
@@ -1269,52 +1769,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
 
         match message.message {
             Internal(msg) => {
-                if topic == Topic::Internal.as_str() {
-                    if message.session_id == "internal" && msg.message == "terminate" {
-                        self.call_callbacks_terminate().await;
-                        *self.running.lock().await = false;
-                        return Ok(None);
-                    }
-
-                    let session_id = message.session_id.clone();
-                    let message = Message {
-                        message: MessageData::Chat(ChatMsg {
-                            message: msg.message.to_string(),
-                            sender_userid: self.get_userid().await,
-                            sender_fingerprint: self
-                                .host_encro
-                                .lock()
-                                .await
-                                .get_public_key_fingerprint(),
-                            date_time: get_current_datetime(),
-                        }),
-                        session_id: session_id.clone(),
-                    };
-                    let msg_enc = self.encrypt_msg(&session_id, &message).await;
-                    if msg_enc.is_ok() {
-                        let msg_enc = msg_enc.unwrap();
-
-                        let message = Message {
-                            message: MessageData::Encrypted(msg_enc),
-                            session_id: session_id.clone(),
-                        };
-                        topic_response = msg.topic;
-
-                        let pk = self.host_encro.lock().await.get_public_key_as_base64();
-                        self.call_callbacks_chat(&pk, &msg.message).await;
-                        return Ok(Some((message, topic_response)));
-                    } else {
-                        return Err(SessionErrorMsg {
-                            code: SessionErrorCodes::Protocol as u32,
-                            message: "Session not found".to_owned(),
-                        });
-                    }
-                } else {
-                    return Err(SessionErrorMsg {
-                        code: SessionErrorCodes::Protocol as u32,
-                        message: "Invalid internal message topic".to_owned(),
-                    });
-                }
+                return self.handle_internal(msg, topic, &session_id).await;
             }
             ReplayResponse(msg) => {
                 if self.relay {
@@ -1344,53 +1799,8 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                 }
                 return Ok(None);
             }
-            DiscoveryReply(_msg) => {
-                let pub_key = _msg.pub_key.clone();
-
-                if pub_key == self.host_encro.lock().await.get_public_key_as_base64() {
-                    return Ok(None);
-                }
-
-                let pub_key_dec = base64::decode(&pub_key);
-                if pub_key_dec.is_err() {
-                    return Err(SessionErrorMsg {
-                        code: SessionErrorCodes::InvalidPublicKey as u32,
-                        message: "Invalid public key".to_owned(),
-                    });
-                }
-                let pub_key_dec = pub_key_dec.unwrap();
-                let discovered_cert = read_from_vec(&pub_key_dec);
-                if discovered_cert.is_err() {
-                    return Err(SessionErrorMsg {
-                        code: SessionErrorCodes::InvalidPublicKey as u32,
-                        message: "Invalid public key".to_owned(),
-                    });
-                }
-                let discovered_cert = discovered_cert.unwrap();
-                let discovered_pub_key_fingerprint = discovered_cert.fingerprint().to_string();
-
-                let mut discovered;
-                {
-                    discovered = self.discovered.lock().await;
-                }
-
-                let this_fingerprint;
-                {
-                    this_fingerprint =
-                        Some(self.host_encro.lock().await.get_public_key_fingerprint());
-                }
-                let this_fingerprint = this_fingerprint.unwrap();
-
-                if discovered_pub_key_fingerprint != this_fingerprint
-                    && !discovered.contains_key(&discovered_pub_key_fingerprint)
-                {
-                    let not_ignore = self.call_callbacks_discovered(&pub_key).await;
-                    if not_ignore {
-                        discovered.insert(discovered_pub_key_fingerprint, pub_key);
-                    }
-                }
-
-                Ok(None)
+            DiscoveryReply(msg) => {
+                return self.handle_discovery_reply(msg).await;
             }
             Heartbeat(_msg) => {
                 if let Some(session_data) = self.sessions.lock().await.get_mut(&session_id) {
@@ -1398,221 +1808,11 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                 }
                 Ok(None)
             }
-            Discovery(_msg) => {
-                let pub_key = _msg.pub_key.clone();
-
-                if pub_key == self.host_encro.lock().await.get_public_key_as_base64() || self.relay
-                {
-                    return Ok(None);
-                }
-
-                let pub_key_dec = base64::decode(&pub_key);
-                if pub_key_dec.is_err() {
-                    return Err(SessionErrorMsg {
-                        code: SessionErrorCodes::InvalidPublicKey as u32,
-                        message: "Invalid public key".to_owned(),
-                    });
-                }
-                let pub_key_dec = pub_key_dec.unwrap();
-                let discovered_cert = read_from_vec(&pub_key_dec);
-                if discovered_cert.is_err() {
-                    return Err(SessionErrorMsg {
-                        code: SessionErrorCodes::InvalidPublicKey as u32,
-                        message: "Invalid public key".to_owned(),
-                    });
-                }
-                let discovered_cert = discovered_cert.unwrap();
-                let discovered_pub_key_fingerprint = discovered_cert.fingerprint().to_string();
-
-                let mut discovered;
-                {
-                    discovered = self.discovered.lock().await;
-                }
-
-                let this_fingerprint;
-                {
-                    this_fingerprint =
-                        Some(self.host_encro.lock().await.get_public_key_fingerprint());
-                }
-                let this_fingerprint = this_fingerprint.unwrap();
-
-                if discovered_pub_key_fingerprint != this_fingerprint
-                    && !discovered.contains_key(&discovered_pub_key_fingerprint)
-                {
-                    let not_ignore = self.call_callbacks_discovered(&pub_key).await;
-                    if not_ignore {
-                        discovered.insert(discovered_pub_key_fingerprint, pub_key);
-                    }
-                }
-
-                response = Message::new_discovery_reply(
-                    self.host_encro.lock().await.get_public_key_as_base64(),
-                );
-                response.session_id = message.session_id.clone();
-                Ok(Some((response, topic_response)))
+            Discovery(msg) => {
+                return self.handle_discovery(msg, &session_id, &topic).await;
             }
             Init(msg) => {
-                {
-                    if self.host_encro.lock().await.get_public_key_as_base64() == msg.pub_key {
-                        return Ok(None);
-                    }
-                }
-
-                if self.relay {
-                    return Ok(None);
-                }
-                let signature = msg.signature.clone();
-                let challenge = msg.challenge.clone();
-
-                if challenge.len() != challenge_len() {
-                    return Err(SessionErrorMsg {
-                        code: SessionErrorCodes::Protocol as u32,
-                        message: "Invalid challenge length".to_owned(),
-                    });
-                }
-
-                let pub_key = msg.pub_key.clone();
-                let pub_key_decoded = match base64::decode(msg.pub_key) {
-                    Err(_) => {
-                        return Err(SessionErrorMsg {
-                            code: SessionErrorCodes::InvalidPublicKey as u32,
-                            message: "Invalid public key base64".to_owned(),
-                        });
-                    }
-                    Ok(pub_key) => pub_key,
-                };
-                match PGPEnCryptOwned::new_from_vec(&pub_key_decoded) {
-                    Ok(pub_encro) => {
-                        {
-                            let other_key = pub_encro.get_public_key_fingerprint();
-
-                            if let Err(_s) = pub_encro.verify(&signature, &other_key) {
-                                let msg = Message::new_init_decline(
-                                    pub_key.clone(),
-                                    "Invalid signature".to_owned(),
-                                );
-                                let mut topic_response = Topic::Initialize.as_str().to_string();
-                                topic_response.push_str("/");
-                                topic_response.push_str(&pub_encro.get_public_key_fingerprint());
-                                return Ok(Some((msg, topic_response)));
-                            }
-                        }
-
-                        let pub_key = pub_encro.get_public_key_as_base64();
-
-                        if self.relay {
-                            println!(
-                                "-- initmsg {} - session id: {}",
-                                pub_encro.get_public_key_fingerprint(),
-                                session_id
-                            );
-                        }
-
-                        let initialize_this = self.call_callbacks_init_incoming(&pub_key).await;
-                        let this_pub_key = self.host_encro.lock().await.get_public_key_as_base64();
-                        if initialize_this {
-                            {
-                                let sym_cipher = ChaCha20Poly1305EnDeCrypt::new();
-                                let sym_cipher_key = sym_cipher.get_public_key_as_base64();
-                                let sym_cipher_key_encrypted =
-                                    match pub_encro.encrypt(&sym_cipher_key) {
-                                        Ok(res) => res,
-                                        Err(_) => {
-                                            return Err(SessionErrorMsg {
-                                                code: SessionErrorCodes::Encryption as u32,
-                                                message: "Failed to encrypt session key".to_owned(),
-                                            });
-                                        }
-                                    };
-                                let sym_cipher_key_encrypted_host =
-                                    match self.host_encro.lock().await.encrypt(&sym_cipher_key) {
-                                        Ok(res) => res,
-                                        Err(_) => {
-                                            return Err(SessionErrorMsg {
-                                                code: SessionErrorCodes::Encryption as u32,
-                                                message: "Failed to encrypt session key".to_owned(),
-                                            });
-                                        }
-                                    };
-                                let pk_1 = pub_encro.get_public_key_fingerprint();
-                                let pk_2 =
-                                    self.host_encro.lock().await.get_public_key_fingerprint();
-
-                                let s = pk_1.clone() + &pk_2;
-                                let key = sha256sum(&s);
-                                let pub_key = pub_encro.get_public_key_as_base64();
-
-                                let challenge_sig =
-                                    match self.host_encro.lock().await.sign(&challenge) {
-                                        Ok(s) => s,
-                                        Err(_e) => {
-                                            return Err(SessionErrorMsg {
-                                                code: SessionErrorCodes::Encryption as u32,
-                                                message: "Failed to create signature of challenge"
-                                                    .to_owned(),
-                                            });
-                                        }
-                                    };
-
-                                let session_data = SessionData {
-                                    id: key.clone(),
-                                    last_active: SystemTime::now(),
-                                    state: SessionState::Initializing,
-                                    pub_key: pub_key.clone(),
-                                    messages: Vec::new(),
-                                    sym_encro: sym_cipher,
-                                    sym_key_encrypted_host: sym_cipher_key_encrypted_host.clone(),
-                                };
-                                let mut msg = Message::new_init_ok(
-                                    sym_cipher_key_encrypted.clone(),
-                                    this_pub_key.clone(),
-                                    pub_encro.get_public_key_as_base64(),
-                                    challenge_sig,
-                                );
-                                msg.session_id = key.clone();
-
-                                if self.memory_active {
-                                    // Store conversation in memory
-                                    let mut others = Vec::new();
-                                    others.push(pub_encro.get_public_key_as_base64());
-
-                                    self.memory.lock().await.new_entry(
-                                        msg.session_id.clone(),
-                                        sym_cipher_key_encrypted_host.clone(),
-                                        others,
-                                    );
-                                }
-
-                                let mut hm = self.requests_incoming_initialization.lock().await;
-                                let mut topic_response = Topic::Initialize.as_str().to_string();
-                                topic_response.push_str("/");
-                                topic_response.push_str(&pub_encro.get_public_key_fingerprint());
-                                hm.push((session_data, msg, topic_response));
-                            }
-                            let mut topic_response = Topic::Initialize.as_str().to_string();
-                            topic_response.push_str("/");
-                            topic_response.push_str(&pub_encro.get_public_key_fingerprint());
-                            let msg = Message::new_init_await(
-                                pub_encro.get_public_key_as_base64(),
-                                this_pub_key.clone(),
-                            );
-                            Ok(Some((msg, topic_response)))
-                        } else {
-                            let mut topic_response = Topic::Initialize.as_str().to_string();
-                            topic_response.push_str("/");
-                            topic_response.push_str(&pub_encro.get_public_key_fingerprint());
-                            let msg = Message::new_init_decline(
-                                pub_encro.get_public_key_as_base64(),
-                                this_pub_key.clone(),
-                            );
-                            Ok(Some((msg, topic_response)))
-                        }
-                    }
-                    Err(_) => Err(SessionErrorMsg {
-                        code: SessionErrorCodes::InvalidPublicKey as u32,
-                        message: "Invalid public key".to_owned(),
-                    }),
-                }
+                return self.handle_init(msg, &session_id).await;
             }
             InitAwait(msg) => {
                 self.call_callbacks_init_await(&msg.pub_key).await;
@@ -1624,111 +1824,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                 Ok(None)
             }
             InitOk(msg) => {
-                let session_id = session_id.clone();
-                let challenge_sig = msg.challenge_sig.clone();
-                let sym_key_encrypted = msg.sym_key_encrypted.clone();
-
-                if self.relay {
-                    relay.register_participant(&msg.pub_key, &session_id);
-                    relay.register_participant(&msg.orig_pub_key, &session_id);
-                    return Ok(None);
-                }
-
-                let sym_key = match self.host_encro.lock().await.decrypt(&sym_key_encrypted) {
-                    Ok(res) => res,
-                    Err(_) => {
-                        return Err(SessionErrorMsg {
-                            code: SessionErrorCodes::InvalidPublicKey as u32,
-                            message: "Invalid session key".to_owned(),
-                        });
-                    }
-                };
-                let mut add_session = None;
-                let _this_pub_key = self.host_encro.lock().await.get_public_key_as_base64();
-                {
-                    let pendings = self.requests_outgoing_initialization.lock().await;
-                    let pub_key_dec = base64::decode(&msg.pub_key);
-                    if pub_key_dec.is_err() {
-                        return Ok(None);
-                    }
-                    let pub_key_dec = pub_key_dec.unwrap();
-                    let cert = read_from_vec(&pub_key_dec);
-                    if cert.is_err() {
-                        return Err(SessionErrorMsg {
-                            code: SessionErrorCodes::InvalidPublicKey as u32,
-                            message: "Invalid key".to_owned(),
-                        });
-                    }
-                    let cert = cert.unwrap();
-                    let other_key_fingerprint = cert.fingerprint().to_string();
-
-                    for (pending_fingerprint, pending_challenge) in pendings.iter() {
-                        let pending_pub_key_fingerprint = pending_fingerprint.clone();
-                        if other_key_fingerprint == pending_pub_key_fingerprint {
-                            // Add this to the sessions to add
-                            let verified = match PGPEnCryptOwned::new_from_vec(&pub_key_dec) {
-                                Ok(pub_encro) => {
-                                    match pub_encro.verify(&challenge_sig, pending_challenge) {
-                                        Ok(result) => result,
-                                        Err(_) => false,
-                                    }
-                                }
-                                _ => false,
-                            };
-                            if verified {
-                                add_session = Some(msg.pub_key.clone())
-                            }
-                        }
-                    }
-                }
-
-                if add_session.is_some() {
-                    let add_session_pub_key = add_session.unwrap();
-                    let pub_key_dec =
-                        base64::decode(&add_session_pub_key).expect("Failed to decode pub_key");
-                    let cert = read_from_vec(&pub_key_dec);
-                    if cert.is_err() {
-                        return Err(SessionErrorMsg {
-                            code: SessionErrorCodes::InvalidPublicKey as u32,
-                            message: "Invalid key".to_owned(),
-                        });
-                    }
-                    let cipher = ChaCha20Poly1305EnDeCrypt::new_from_str(&sym_key);
-                    let key = session_id;
-                    let session_data = SessionData {
-                        id: key.clone(),
-                        last_active: SystemTime::now(),
-                        state: SessionState::Active,
-                        messages: Vec::new(),
-                        sym_encro: cipher,
-                        sym_key_encrypted_host: sym_key_encrypted.clone(),
-                        pub_key: add_session_pub_key.clone(),
-                    };
-
-                    let new_session_data = session_data.clone();
-                    let new_session_id = session_data.id.clone();
-
-                    {
-                        let mut sessions = self.sessions.lock().await;
-                        sessions.insert(new_session_id.clone(), new_session_data);
-                        let mut others = Vec::new();
-                        others.push(add_session_pub_key.clone());
-                        if self.memory_active {
-                            self.memory.lock().await.new_entry(
-                                new_session_id.clone(),
-                                sym_key_encrypted.clone(),
-                                others,
-                            );
-                        }
-                    }
-
-                    self.call_callbacks_init_accepted(&add_session_pub_key.clone())
-                        .await;
-
-                    self.chat(new_session_id.clone(), false, add_session_pub_key.clone())
-                        .await;
-                }
-                Ok(None)
+                return self.handle_init_ok(msg, &session_id, relay).await;
             }
             Close(_msg) => {
                 let session_id = message.session_id.clone();
@@ -1785,81 +1881,14 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                 return Ok(None);
             }
             Encrypted(msg) => {
-                let session_key_old = self.memory.lock().await.get_encrypted_sym_key(&session_id);
-                if session_key_old.is_ok() {
-                    // decrypt the encrypted symmetrical key
-                    let session_key_old = session_key_old.unwrap();
-                    let sym_key = self.decrypt_encrypted_str(session_key_old).await;
-                    if sym_key.is_ok() {
-                        let sym_key = sym_key.unwrap();
-                        let dec_msg = self
-                            .decrypt_sym_encrypted_msg(sym_key.clone(), msg.data.clone())
-                            .await;
-
-                        if dec_msg.is_ok() {
-                            let dec_msg = dec_msg.unwrap();
-                            let _ = self.handle_message(dec_msg, topic, relay, true).await;
-                        }
-                    }
-                }
-
-                let dec_msg;
-                {
-                    let sm = &self.sessions.lock().await;
-                    let cipher = match sm.get(&message.session_id) {
-                        Some(m) => m.sym_encro.clone(),
-                        None => {
-                            return Err(SessionErrorMsg {
-                                code: SessionErrorCodes::InvalidMessage as u32,
-                                message: "Invalid session id".to_owned(),
-                            });
-                        }
-                    };
-                    let decrypted = match cipher.decrypt(&msg.data) {
-                        Ok(res) => res,
-                        Err(_) => {
-                            return Err(SessionErrorMsg {
-                                code: SessionErrorCodes::Encryption as u32,
-                                message: "Failed to decrypt message".to_owned(),
-                            });
-                        }
-                    };
-                    dec_msg = Some(match Message::deserialize(&decrypted) {
-                        Ok(m) => m,
-                        Err(_) => {
-                            return Err(SessionErrorMsg {
-                                code: SessionErrorCodes::Serialization as u32,
-                                message: "Failed to parse message".to_owned(),
-                            });
-                        }
-                    });
-                }
-                if dec_msg.is_some() {
-                    let dec_msg = dec_msg.unwrap();
-                    self.handle_message(dec_msg, topic, relay, true).await
-                } else {
-                    return Err(SessionErrorMsg {
-                        code: SessionErrorCodes::Encryption as u32,
-                        message: "Failed to decrypt message".to_owned(),
-                    });
-                }
+                return self.handle_encrypted(msg, topic, &session_id, relay).await;
             }
             Email(msg) => {
                 if !has_been_decypted {
                     return Ok(None);
                 }
                 let session_id = msg.session_id.clone();
-                if self.relay {
-                    /*
-                    if let Some(messages_in_session) = relay.put_message(session_id.clone(), msg) {
-                        println!(
-                            "session {} has {} messages in memory",
-                            session_id, messages_in_session
-                        );
-                    } else {
-                        println!("failed to add message to session {}", session_id);
-                    }*/
-                } else {
+                if !self.relay {
                     // Store this in memory if it exists
                     if self.memory.lock().await.in_memory(&session_id) {
                         self.inbox.lock().await.add_entry(msg.clone());

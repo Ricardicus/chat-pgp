@@ -655,30 +655,11 @@ impl App {
             .scrollstate_chat
             .content_length(state.chat_messages.len());
     }
-    async fn set_last_message_raw(&mut self, _window: usize, message: String, style: TextStyle) {
-        let mut state = self.state.lock().await;
-        let cmd = PrintCommand {
-            window: 0,
-            message: message.clone(),
-            style: style,
-            color: TextColor::White,
-        };
-        if state.messages.len() > 0 {
-            if let Some(last) = state.messages.last_mut() {
-                last.clear();
-                last.push(cmd);
-            }
-        } else {
-            let mut v = Vec::new();
-            v.push(cmd);
-            state.messages.push(v);
-        }
-    }
-    async fn set_last_message(&mut self, cmd: PrintCommand) {
+
+    async fn add_last_message(&mut self, cmd: PrintCommand) {
         let mut state = self.state.lock().await;
         if state.messages.len() > 0 {
             if let Some(last) = state.messages.last_mut() {
-                last.clear();
                 last.push(cmd);
             }
         } else {
@@ -712,7 +693,7 @@ impl App {
                 match timeout(timeout_duration, pipe.read()).await {
                     Ok(Ok(command)) => match command {
                         WindowCommand::Print(cmd) => {
-                            app.set_last_message(cmd).await;
+                            app.add_last_message(cmd).await;
                         }
                         WindowCommand::Println(cmd) => {
                             app.write_new_message(cmd).await;
@@ -1036,7 +1017,7 @@ impl App {
             )),
         }
 
-        let messages: Vec<Line> = messages
+        let mut messages: Vec<Line> = messages
             .iter()
             .map(|m| {
                 Line::from(
@@ -1082,6 +1063,11 @@ impl App {
                 )
             })
             .collect();
+        let height = messages_area.height as usize;
+        if messages.len() >= height {
+            let start_index = messages.len() - height + 2;
+            messages = (&messages[start_index..]).to_vec();
+        }
         let messages = Paragraph::new(messages)
             .block(Block::bordered().title("Commands"))
             .scroll((
