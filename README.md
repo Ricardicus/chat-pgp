@@ -90,7 +90,10 @@ Will work on this:
 Want to add:
 - Group chat (not sure how to implement)
 
-Today the platform only works strictly online, with both peers connected at the same time.
+Today the platform only works strictly online, with both peers connected at the same time unless
+a relay service is connected to the zenohd service. I might set this up globally, but it defeats
+the purpose a little bit. The philosophy is not to make this as user friendly as possible, you can
+be the network manager if you want to. 
 
 ## Contribute
 
