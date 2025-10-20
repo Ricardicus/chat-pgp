@@ -1360,6 +1360,7 @@ async fn main() {
     // check if gpgkey == "new"
     if gpgkey == "new" {
         cert = Some(generate_new_key_with(email).unwrap());
+        println!("Generating a new gpg key");
     }
 
     let mut passphrase = String::new();
@@ -1494,6 +1495,7 @@ async fn main() {
     });
 
     let mut session_clone = session.clone();
+    let zenoh_config_clone = zenoh_config.clone();
     tokio::spawn(async move {
         let _ = match session_clone.serve().await {
             Ok(_) => {}
@@ -1501,8 +1503,11 @@ async fn main() {
                 MessagingError::ZenohError => {
                     terminate(tx).await;
                     println!("Something went wrong with the communication protocol. Check the configuration from Zenoh.");
-                    println!("Review your Zenoh configuration file '{}':", zenoh_config);
-                    let contents = fs::read_to_string(zenoh_config)
+                    println!(
+                        "Review your Zenoh configuration file '{}':",
+                        zenoh_config_clone
+                    );
+                    let contents = fs::read_to_string(zenoh_config_clone)
                         .expect("Something went wrong reading the file");
                     println!("{}", contents);
                     println!(
@@ -1514,5 +1519,18 @@ async fn main() {
         };
     });
 
-    let _ = launch_terminal_program(cert.clone(), session.get_tx().await, session.clone()).await;
+    let res = launch_terminal_program(cert.clone(), session.get_tx().await, session.clone()).await;
+    match res {
+        Ok(_) => {}
+        Err(_) => {
+            println!("Failed to setup communication channel. Is Zenoh OK?");
+            println!(
+                "The following zenoh config file '{}' was used:",
+                zenoh_config
+            );
+            let contents = fs::read_to_string(zenoh_config)
+                .expect("Something went wrong reading the file, does it exist?");
+            println!("{}", contents);
+        }
+    }
 }

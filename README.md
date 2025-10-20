@@ -52,6 +52,10 @@ If you want to build and run with a gpg key with fingerprint D54FED01913E2120AD9
 
 If you don't have a gpg-key already, the program will generate one for you with the user id of "chatpgp@example.org". 
 
+If you reach a zenoh server (zenohd instance) then a terminal based GUI will pop up.
+
+![Terminal based GUI](media/screenshot.png)
+
 ## Email infrastructure 
 
 It is possible to enable an email feature to the server infrastructure also.
