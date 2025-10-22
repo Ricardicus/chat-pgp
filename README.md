@@ -6,9 +6,7 @@ The idea is to create a simple chat platform that is based on strong encryption.
 
 ## Encryption
 
-Each chat session is encrypted using a symmectrical ChaCha20Poly1305 algorithm
-with a shared secret that is protected with PGP assymetrical
-encryption. If you are unfamiliar with OpenPGP and using GnuPG then see this [GnuPG guide](https://www.gnupg.org/gph/en/manual/c14.html). 
+Each chat session derives a shared secret via Diffie–Hellman (X25519) and encrypts messages with XChaCha20-Poly1305 using libsodium. OpenPGP is used to sign/authenticate the ephemeral DH keys. If you are unfamiliar with OpenPGP and using GnuPG then see this [GnuPG guide](https://www.gnupg.org/gph/en/manual/c14.html). 
 
 ## Communication
 
