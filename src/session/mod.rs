@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use regex::Regex;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::File;
@@ -20,13 +21,16 @@ pub mod protocol;
 use crate::pgp::pgp::read_from_vec;
 use crate::util::{get_current_datetime, RingBuffer};
 use async_recursion::async_recursion;
+use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD};
+use base64::{engine::general_purpose as b64, Engine as _};
 use crypto::{
     sha256sum, ChaCha20Poly1305EnDeCrypt, Cryptical, CrypticalDecrypt, CrypticalEncrypt,
-    CrypticalID, CrypticalSign, CrypticalVerify, PGPEnCryptOwned, PGPEnDeCrypt,
+    CrypticalID, CrypticalSign, CrypticalVerify, PGPEnCryptOwned, PGPEnDeCrypt, SodiumKxEnDeCrypt,
 };
 use futures::prelude::*;
 use inbox::Inbox;
 use inbox::InboxEntry;
+use libsodium_rs::{crypto_aead::xchacha20poly1305 as aead, crypto_kx};
 use memory::{Memory, SessionLogMessage};
 use messages::MessageData::{
     Chat, Close, Discovery, DiscoveryReply, Email, Encrypted, EncryptedRelay, Heartbeat, Init,
@@ -60,7 +64,7 @@ pub enum SessionError {
 #[derive(Clone)]
 pub struct SessionData<SessionCrypto>
 where
-    SessionCrypto: CrypticalEncrypt + CrypticalDecrypt,
+    SessionCrypto: CrypticalEncrypt + CrypticalDecrypt + Serialize + DeserializeOwned,
 {
     pub id: String,
     pub last_active: SystemTime,
@@ -73,12 +77,12 @@ where
 
 pub struct Session<SessionCrypto, HostCrypto>
 where
-    SessionCrypto: CrypticalEncrypt + CrypticalDecrypt,
+    SessionCrypto: CrypticalEncrypt + CrypticalDecrypt + Serialize + DeserializeOwned,
     HostCrypto: CrypticalEncrypt + CrypticalDecrypt,
 {
     pub sessions: Arc<Mutex<HashMap<String, SessionData<SessionCrypto>>>>,
     pub discovered: Arc<Mutex<HashMap<String, String>>>,
-    pub requests_outgoing_initialization: Arc<Mutex<Vec<(String, String)>>>,
+    pub requests_outgoing_initialization: Arc<Mutex<Vec<(String, crypto_kx::KeyPair)>>>,
     pub requests_incoming_initialization:
         Arc<Mutex<Vec<(SessionData<SessionCrypto>, Message, String)>>>,
     pub host_encro: Arc<Mutex<HostCrypto>>,
@@ -163,7 +167,7 @@ where
     running: Arc<Mutex<bool>>,
 }
 
-impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
+impl Session<SodiumKxEnDeCrypt, PGPEnDeCrypt> {
     pub fn new(
         host_encro: PGPEnDeCrypt,
         middleware_config: String,
@@ -258,7 +262,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
         self.tx_chat = tx;
     }
 
-    pub async fn get_pending_request(&self) -> Option<SessionData<ChaCha20Poly1305EnDeCrypt>> {
+    pub async fn get_pending_request(&self) -> Option<SessionData<SodiumKxEnDeCrypt>> {
         let requests = self.requests_incoming_initialization.lock().await;
         if requests.len() > 0 {
             let session_data = requests[0].0.clone();
@@ -578,6 +582,13 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
         pub_key: String,
         zenoh_handler: &ZenohHandler,
     ) -> Result<String, String> {
+        //let server_kx = crypto_kx::KeyPair::generate().unwrap();
+        let client_kx = crypto_kx::KeyPair::generate().unwrap();
+
+        // Exchange public keys (Base64)
+        //let server_pub_b64 = b64::STANDARD_NO_PAD.encode(server_kx.public_key.as_bytes());
+        let client_pub_eph_b64 = b64::STANDARD_NO_PAD.encode(client_kx.public_key.as_bytes());
+
         let pub_key_dec = base64::decode(&pub_key).expect("Failed to decode pub_key");
         let cert = read_from_vec(&pub_key_dec);
         if cert.is_err() {
@@ -585,8 +596,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
         }
         let cert = cert.unwrap();
         let other_key_fingerprint = cert.fingerprint().to_string();
-        let pub_key = self.host_encro.lock().await.get_public_key_fingerprint();
-        let signature = match self.host_encro.lock().await.sign(&pub_key) {
+        let signature = match self.host_encro.lock().await.sign(&client_pub_eph_b64) {
             Ok(s) => s,
             Err(e) => {
                 return Err(e);
@@ -594,8 +604,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
         };
 
         let pub_key = self.host_encro.lock().await.get_public_key_as_base64();
-        let mut challenge = String::new();
-        let message = Message::new_init(pub_key, signature, &mut challenge);
+        let message = Message::new_init(pub_key, client_pub_eph_b64, signature);
         let mut topic = Topic::Initialize.as_str().to_string();
         topic.push_str("/");
         topic.push_str(&cert.fingerprint().to_string());
@@ -603,7 +612,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
 
         {
             let mut requests = self.requests_outgoing_initialization.lock().await;
-            requests.push((other_key_fingerprint.clone(), challenge));
+            requests.push((other_key_fingerprint.clone(), client_kx));
         }
 
         let _ = zenoh_handler.send_message(&topic, message).await;
@@ -730,7 +739,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
         }
     }
 
-    pub async fn get_sessions(&self) -> HashMap<String, SessionData<ChaCha20Poly1305EnDeCrypt>> {
+    pub async fn get_sessions(&self) -> HashMap<String, SessionData<SodiumKxEnDeCrypt>> {
         let hm = self.sessions.lock().await;
         hm.clone()
     }
@@ -1260,29 +1269,17 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
         session_id: &str,
         relay: &mut SessionRelay,
     ) -> Result<Option<(Message, String)>, SessionErrorMsg> {
-        let challenge_sig = msg.challenge_sig.clone();
-        let sym_key_encrypted = msg.sym_key_encrypted.clone();
-
         if self.relay {
-            relay.register_participant(&msg.pub_key, &session_id);
-            relay.register_participant(&msg.orig_pub_key, &session_id);
+            relay.register_participant(&msg.pub_key_pgp, &session_id);
+            relay.register_participant(&msg.orig_pub_key_pgp, &session_id);
             return Ok(None);
         }
 
-        let sym_key = match self.host_encro.lock().await.decrypt(&sym_key_encrypted) {
-            Ok(res) => res,
-            Err(_) => {
-                return Err(SessionErrorMsg {
-                    code: SessionErrorCodes::InvalidPublicKey as u32,
-                    message: "Invalid session key".to_owned(),
-                });
-            }
-        };
         let mut add_session = None;
         let _this_pub_key = self.host_encro.lock().await.get_public_key_as_base64();
         {
             let pendings = self.requests_outgoing_initialization.lock().await;
-            let pub_key_dec = base64::decode(&msg.pub_key);
+            let pub_key_dec = base64::decode(&msg.pub_key_pgp);
             if pub_key_dec.is_err() {
                 return Ok(None);
             }
@@ -1296,29 +1293,37 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
             }
             let cert = cert.unwrap();
             let other_key_fingerprint = cert.fingerprint().to_string();
+            let server_pub_b64 = msg.pub_key_eph.clone();
 
-            for (pending_fingerprint, pending_challenge) in pendings.iter() {
+            for (pending_fingerprint, client_keypair) in pendings.iter() {
+                let client =
+                    SodiumKxEnDeCrypt::new_from_keypair(&client_keypair, &server_pub_b64, true)
+                        .unwrap();
                 let pending_pub_key_fingerprint = pending_fingerprint.clone();
                 if other_key_fingerprint == pending_pub_key_fingerprint {
                     // Add this to the sessions to add
                     let verified = match PGPEnCryptOwned::new_from_vec(&pub_key_dec) {
-                        Ok(pub_encro) => {
-                            match pub_encro.verify(&challenge_sig, pending_challenge) {
-                                Ok(result) => result,
-                                Err(_) => false,
-                            }
-                        }
+                        Ok(pub_encro) => match pub_encro.verify(&msg.signature, &msg.pub_key_eph) {
+                            Ok(result) => result,
+                            Err(_) => false,
+                        },
                         _ => false,
                     };
                     if verified {
-                        add_session = Some(msg.pub_key.clone())
+                        if let Ok(client) = SodiumKxEnDeCrypt::new_from_keypair(
+                            &client_keypair,
+                            &server_pub_b64,
+                            true,
+                        ) {
+                            add_session = Some(client)
+                        }
                     }
                 }
             }
         }
 
         if add_session.is_some() {
-            let add_session_pub_key = add_session.unwrap();
+            let add_session_pub_key = msg.pub_key_pgp.clone();
             let pub_key_dec =
                 base64::decode(&add_session_pub_key).expect("Failed to decode pub_key");
             let cert = read_from_vec(&pub_key_dec);
@@ -1328,33 +1333,51 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                     message: "Invalid key".to_owned(),
                 });
             }
-            let cipher = ChaCha20Poly1305EnDeCrypt::new_from_str(&sym_key);
-            let key = session_id;
-            let session_data = SessionData {
-                id: key.into(),
-                last_active: SystemTime::now(),
-                state: SessionState::Active,
-                messages: Vec::new(),
-                sym_encro: cipher,
-                sym_key_encrypted_host: sym_key_encrypted.clone(),
-                pub_key: add_session_pub_key.clone(),
-            };
+            let cipher = add_session.unwrap();
+            let key = session_id.to_owned();
+            let new_session_id = key.clone();
 
-            let new_session_data = session_data.clone();
-            let new_session_id = session_data.id.clone();
+            if self.memory_active {
+                let session_data = SessionData {
+                    id: new_session_id.clone(),
+                    last_active: SystemTime::now(),
+                    state: SessionState::Active,
+                    messages: Vec::new(),
+                    sym_encro: cipher.clone(),
+                    sym_key_encrypted_host: "Not used".to_owned(),
+                    pub_key: msg.pub_key_pgp.clone(),
+                };
 
-            {
+                let cipher_cbor =
+                    serde_cbor::to_vec(&cipher).map_err(|e| format!("CBOR encode error: {e}"));
+                if cipher_cbor.is_err() {
+                    return Err(SessionErrorMsg {
+                        code: SessionErrorCodes::Serialization as u32,
+                        message: format!("CBOR encode error: {}", cipher_cbor.err().unwrap()),
+                    });
+                }
+                let cipher_serialized = STANDARD_NO_PAD.encode(cipher_cbor.unwrap());
+
+                let cipher_encrypted = self.encrypt_raw_str(cipher_serialized).await;
+                if cipher_encrypted.is_err() {
+                    return Err(SessionErrorMsg {
+                        code: SessionErrorCodes::Encryption as u32,
+                        message: "Failed to encrypt session data".to_owned(),
+                    });
+                }
+                let cipher_encrypted = cipher_encrypted.unwrap();
+
                 let mut sessions = self.sessions.lock().await;
-                sessions.insert(new_session_id.clone(), new_session_data);
+                sessions.insert(new_session_id.clone(), session_data);
                 let mut others = Vec::new();
                 others.push(add_session_pub_key.clone());
-                if self.memory_active {
-                    self.memory.lock().await.new_entry(
-                        new_session_id.clone(),
-                        sym_key_encrypted.clone(),
-                        others,
-                    );
-                }
+
+                self.memory.lock().await.new_entry(
+                    new_session_id.clone(),
+                    self.host_encro.lock().await.get_public_key_as_base64(),
+                    cipher_encrypted.clone(),
+                    others,
+                );
             }
 
             self.call_callbacks_init_accepted(&add_session_pub_key.clone())
@@ -1371,27 +1394,19 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
         msg: InitMsg,
         session_id: &str,
     ) -> Result<Option<(Message, String)>, SessionErrorMsg> {
-        {
-            if self.host_encro.lock().await.get_public_key_as_base64() == msg.pub_key {
-                return Ok(None);
-            }
+        /* Some basic pass through checks */
+        if self.host_encro.lock().await.get_public_key_as_base64() == msg.pub_key_pgp {
+            return Ok(None);
         }
-
         if self.relay {
             return Ok(None);
         }
-        let signature = msg.signature.clone();
-        let challenge = msg.challenge.clone();
 
-        if challenge.len() != challenge_len() {
-            return Err(SessionErrorMsg {
-                code: SessionErrorCodes::Protocol as u32,
-                message: "Invalid challenge length".to_owned(),
-            });
-        }
+        let pub_key_eph = msg.pub_key_eph.clone();
+        let signature = msg.signature_pgp.clone();
 
-        let pub_key = msg.pub_key.clone();
-        let pub_key_decoded = match base64::decode(msg.pub_key) {
+        /* Check that the signature is OK */
+        let pub_key_decoded = match base64::decode(msg.pub_key_pgp.clone()) {
             Err(_) => {
                 return Err(SessionErrorMsg {
                     code: SessionErrorCodes::InvalidPublicKey as u32,
@@ -1402,56 +1417,41 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
         };
         match PGPEnCryptOwned::new_from_vec(&pub_key_decoded) {
             Ok(pub_encro) => {
-                {
-                    let other_key = pub_encro.get_public_key_fingerprint();
-
-                    if let Err(_s) = pub_encro.verify(&signature, &other_key) {
-                        let msg = Message::new_init_decline(
-                            pub_key.clone(),
-                            "Invalid signature".to_owned(),
-                        );
-                        let mut topic_response = Topic::Initialize.as_str().to_string();
-                        topic_response.push_str("/");
-                        topic_response.push_str(&pub_encro.get_public_key_fingerprint());
-                        return Ok(Some((msg, topic_response)));
-                    }
-                }
-
-                let pub_key = pub_encro.get_public_key_as_base64();
-
-                if self.relay {
-                    println!(
-                        "-- initmsg {} - session id: {}",
-                        pub_encro.get_public_key_fingerprint(),
-                        session_id
+                if let Err(_s) = pub_encro.verify(&signature, &pub_key_eph) {
+                    let msg = Message::new_init_decline(
+                        pub_key_eph.clone(),
+                        "Invalid signature".to_owned(),
                     );
+                    let mut topic_response = Topic::Initialize.as_str().to_string();
+                    topic_response.push_str("/");
+                    topic_response.push_str(&pub_encro.get_public_key_fingerprint());
+                    return Ok(Some((msg, topic_response)));
                 }
 
+                /* Signature OK! */
+                /* Initialize Diffie-Hellman */
+                let server_kx = crypto_kx::KeyPair::generate().unwrap();
+                //et client_kx = crypto_kx::KeyPair::generate().unwrap();
+
+                // Exchange public keys (Base64)
+                let server_pub_b64 = b64::STANDARD_NO_PAD.encode(server_kx.public_key.as_bytes());
+                //let client_pub_b64 = b64::STANDARD_NO_PAD.encode(client_kx.public_key.as_bytes());
+
+                // Derive session keys
+                let server =
+                    SodiumKxEnDeCrypt::new_from_keypair(&server_kx, &pub_key_eph, false).unwrap();
+
+                let signature = match self.host_encro.lock().await.sign(&server_pub_b64) {
+                    Ok(s) => s,
+                    Err(e) => e,
+                };
+                let pub_key = pub_encro.get_public_key_as_base64();
                 let initialize_this = self.call_callbacks_init_incoming(&pub_key).await;
                 let this_pub_key = self.host_encro.lock().await.get_public_key_as_base64();
                 if initialize_this {
                     {
-                        let sym_cipher = ChaCha20Poly1305EnDeCrypt::new();
-                        let sym_cipher_key = sym_cipher.get_public_key_as_base64();
-                        let sym_cipher_key_encrypted = match pub_encro.encrypt(&sym_cipher_key) {
-                            Ok(res) => res,
-                            Err(_) => {
-                                return Err(SessionErrorMsg {
-                                    code: SessionErrorCodes::Encryption as u32,
-                                    message: "Failed to encrypt session key".to_owned(),
-                                });
-                            }
-                        };
-                        let sym_cipher_key_encrypted_host =
-                            match self.host_encro.lock().await.encrypt(&sym_cipher_key) {
-                                Ok(res) => res,
-                                Err(_) => {
-                                    return Err(SessionErrorMsg {
-                                        code: SessionErrorCodes::Encryption as u32,
-                                        message: "Failed to encrypt session key".to_owned(),
-                                    });
-                                }
-                            };
+                        let sym_cipher = server;
+                        let sym_cipher_key_encrypted_host = "Not used".to_owned();
                         let pk_1 = pub_encro.get_public_key_fingerprint();
                         let pk_2 = self.host_encro.lock().await.get_public_key_fingerprint();
 
@@ -1459,30 +1459,20 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                         let key = sha256sum(&s);
                         let pub_key = pub_encro.get_public_key_as_base64();
 
-                        let challenge_sig = match self.host_encro.lock().await.sign(&challenge) {
-                            Ok(s) => s,
-                            Err(_e) => {
-                                return Err(SessionErrorMsg {
-                                    code: SessionErrorCodes::Encryption as u32,
-                                    message: "Failed to create signature of challenge".to_owned(),
-                                });
-                            }
-                        };
-
                         let session_data = SessionData {
                             id: key.clone(),
                             last_active: SystemTime::now(),
                             state: SessionState::Initializing,
                             pub_key: pub_key.clone(),
                             messages: Vec::new(),
-                            sym_encro: sym_cipher,
+                            sym_encro: sym_cipher.clone(),
                             sym_key_encrypted_host: sym_cipher_key_encrypted_host.clone(),
                         };
                         let mut msg = Message::new_init_ok(
-                            sym_cipher_key_encrypted.clone(),
                             this_pub_key.clone(),
-                            pub_encro.get_public_key_as_base64(),
-                            challenge_sig,
+                            server_pub_b64.clone(),
+                            signature.clone(),
+                            msg.pub_key_pgp.clone(),
                         );
                         msg.session_id = key.clone();
 
@@ -1491,9 +1481,32 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
                             let mut others = Vec::new();
                             others.push(pub_encro.get_public_key_as_base64());
 
+                            let cipher_cbor = serde_cbor::to_vec(&sym_cipher)
+                                .map_err(|e| format!("CBOR encode error: {e}"));
+                            if cipher_cbor.is_err() {
+                                return Err(SessionErrorMsg {
+                                    code: SessionErrorCodes::Serialization as u32,
+                                    message: format!(
+                                        "CBOR encode error: {}",
+                                        cipher_cbor.err().unwrap()
+                                    ),
+                                });
+                            }
+                            let cipher_serialized = STANDARD_NO_PAD.encode(cipher_cbor.unwrap());
+
+                            let cipher_encrypted = self.encrypt_raw_str(cipher_serialized).await;
+                            if cipher_encrypted.is_err() {
+                                return Err(SessionErrorMsg {
+                                    code: SessionErrorCodes::Encryption as u32,
+                                    message: "Failed to encrypt session data".to_owned(),
+                                });
+                            }
+                            let cipher_encrypted = cipher_encrypted.unwrap();
+
                             self.memory.lock().await.new_entry(
                                 msg.session_id.clone(),
-                                sym_cipher_key_encrypted_host.clone(),
+                                self.host_encro.lock().await.get_public_key_as_base64(),
+                                cipher_encrypted.clone(),
                                 others,
                             );
                         }
@@ -1644,20 +1657,52 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
         session_id: &str,
         relay: &mut SessionRelay,
     ) -> Result<Option<(Message, String)>, SessionErrorMsg> {
-        let session_key_old = self.memory.lock().await.get_encrypted_sym_key(&session_id);
-        if session_key_old.is_ok() {
+        let session_cipher_old = self.memory.lock().await.get_encrypted_cipher(&session_id);
+        if session_cipher_old.is_ok() {
             // decrypt the encrypted symmetrical key
-            let session_key_old = session_key_old.unwrap();
-            let sym_key = self.decrypt_encrypted_str(session_key_old).await;
-            if sym_key.is_ok() {
-                let sym_key = sym_key.unwrap();
-                let dec_msg = self
-                    .decrypt_sym_encrypted_msg(sym_key.clone(), msg.data.clone())
-                    .await;
+            let (session_cipher_old, pub_key_pgp) = session_cipher_old.unwrap();
 
-                if dec_msg.is_ok() {
-                    let dec_msg = dec_msg.unwrap();
-                    let _ = self.handle_message(dec_msg, topic, relay, true).await;
+            let pub_key_dec = base64::decode(&pub_key_pgp).expect("Failed to decode pub_key");
+            let cert = read_from_vec(&pub_key_dec);
+            if cert.is_err() {
+                return Err(SessionErrorMsg {
+                    code: SessionErrorCodes::Encryption as u32,
+                    message: "Failed to decrypt message".to_owned(),
+                });
+            }
+            let cert = cert.unwrap();
+            let fingerprint = cert.fingerprint().to_string();
+
+            // Check that we used the same fingerprint here
+            if self.host_encro.lock().await.get_public_key_fingerprint() == fingerprint {
+                let cipher_old_serialized = self.decrypt_encrypted_str(session_cipher_old).await;
+                if cipher_old_serialized.is_ok() {
+                    let cipher_old_serialized = cipher_old_serialized.unwrap();
+                    let cipher_old = SodiumKxEnDeCrypt::from_base64_cbor(&cipher_old_serialized);
+                    if cipher_old.is_ok() {
+                        let cipher_old = cipher_old.unwrap();
+
+                        let decrypted = match cipher_old.decrypt(&msg.data) {
+                            Ok(res) => res,
+                            Err(_) => {
+                                return Err(SessionErrorMsg {
+                                    code: SessionErrorCodes::Encryption as u32,
+                                    message: "Failed to decrypt message".to_owned(),
+                                });
+                            }
+                        };
+                        match Message::deserialize(&decrypted) {
+                            Ok(dec_msg) => {
+                                return self.handle_message(dec_msg, topic, relay, true).await;
+                            }
+                            Err(_) => {
+                                return Err(SessionErrorMsg {
+                                    code: SessionErrorCodes::Serialization as u32,
+                                    message: "Failed to parse message".to_owned(),
+                                });
+                            }
+                        };
+                    }
                 }
             }
         }
@@ -1914,6 +1959,13 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
         }
     }
 
+    pub async fn encrypt_raw_str(&self, input: String) -> Result<String, ()> {
+        match self.host_encro.lock().await.encrypt(&input) {
+            Ok(res) => Ok(res),
+            Err(_) => Err(()),
+        }
+    }
+
     pub async fn decrypt_sym_encrypted_str(
         &self,
         sym_key: String,
@@ -2036,7 +2088,7 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
     pub async fn get_reminded_session_log(
         &self,
         session_id: &str,
-    ) -> Result<(String, Vec<SessionLogMessage>), ()> {
+    ) -> Result<(String, String, Vec<SessionLogMessage>), ()> {
         self.memory.lock().await.get_session_log(session_id)
     }
 
@@ -2058,45 +2110,61 @@ impl Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt> {
         gateway: &T,
     ) -> Result<(), ()> {
         let topic = Topic::email_topic(&session_id);
-        let session_key_old = self.memory.lock().await.get_encrypted_sym_key(&session_id);
         let subject = Self::extract_subject(&message);
-        if session_key_old.is_ok() {
+
+        let session_cipher_old = self.memory.lock().await.get_encrypted_cipher(&session_id);
+        if session_cipher_old.is_ok() {
             // decrypt the encrypted symmetrical key
-            let session_key_old = session_key_old.unwrap();
-            let sym_key = self.decrypt_encrypted_str(session_key_old).await;
-            if sym_key.is_ok() {
-                let sym_key = sym_key.unwrap();
-                let cipher = ChaCha20Poly1305EnDeCrypt::new_from_str(&sym_key);
+            let (session_cipher_old, pub_key_pgp) = session_cipher_old.unwrap();
 
-                let email = EmailMsg {
-                    session_id: session_id.to_owned(),
-                    sender: self.get_userid().await,
-                    message: message.clone(),
-                    subject: subject.clone(),
-                    date_time: get_current_datetime(),
-                };
-                let msg = Message {
-                    message: MessageData::Email(email),
-                    session_id: session_id.to_string(),
-                };
-                let email_ser = msg.serialize().unwrap();
+            let pub_key_dec = base64::decode(&pub_key_pgp).expect("Failed to decode pub_key");
+            let cert = read_from_vec(&pub_key_dec);
+            if cert.is_err() {
+                return Err(());
+            }
+            let cert = cert.unwrap();
+            let fingerprint = cert.fingerprint().to_string();
 
-                let msg_encrypted = match cipher.encrypt(&email_ser) {
-                    Ok(m) => m,
-                    Err(_) => {
-                        return Err(());
+            // Check that we used the same fingerprint here
+            if self.host_encro.lock().await.get_public_key_fingerprint() == fingerprint {
+                let cipher_old_serialized = self.decrypt_encrypted_str(session_cipher_old).await;
+                if cipher_old_serialized.is_ok() {
+                    let cipher_old_serialized = cipher_old_serialized.unwrap();
+                    let cipher_old = SodiumKxEnDeCrypt::from_base64_cbor(&cipher_old_serialized);
+                    if cipher_old.is_ok() {
+                        let cipher_old = cipher_old.unwrap();
+
+                        let email = EmailMsg {
+                            session_id: session_id.to_owned(),
+                            sender: self.get_userid().await,
+                            message: message.clone(),
+                            subject: subject.clone(),
+                            date_time: get_current_datetime(),
+                        };
+                        let msg = Message {
+                            message: MessageData::Email(email),
+                            session_id: session_id.to_string(),
+                        };
+                        let email_ser = msg.serialize().unwrap();
+
+                        let msg_encrypted = match cipher_old.encrypt(&email_ser) {
+                            Ok(m) => m,
+                            Err(_) => {
+                                return Err(());
+                            }
+                        };
+                        let msg = Message {
+                            message: MessageData::EncryptedRelay(EncryptedRelayMsg {
+                                data: msg_encrypted,
+                            }),
+                            session_id: session_id.to_string(),
+                        };
+                        match gateway.send_message(&topic, msg).await {
+                            Ok(_) => {}
+                            Err(_error) => return Err(()),
+                        };
                     }
-                };
-                let msg = Message {
-                    message: MessageData::EncryptedRelay(EncryptedRelayMsg {
-                        data: msg_encrypted,
-                    }),
-                    session_id: session_id.to_string(),
-                };
-                match gateway.send_message(&topic, msg).await {
-                    Ok(_) => {}
-                    Err(_error) => return Err(()),
-                };
+                }
             }
         }
         Ok(())

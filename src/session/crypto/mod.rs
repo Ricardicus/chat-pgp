@@ -1,14 +1,22 @@
 extern crate sequoia_openpgp as openpgp;
-use aead::generic_array::GenericArray;
 use chacha20poly1305::{
-    aead::{Aead, AeadCore, KeyInit, OsRng},
+    aead::{generic_array::GenericArray, Aead, AeadCore, KeyInit, OsRng},
     ChaCha20Poly1305,
 };
 use openpgp::policy::StandardPolicy as P;
 use openpgp::Cert;
-
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
+
+use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD};
+use base64::{engine::general_purpose as b64, Engine as _};
+use libsodium_rs::{crypto_aead::xchacha20poly1305 as aead, crypto_kx};
+use std::fmt::Write;
+
+use std::fs::OpenOptions;
+use std::io::Write as IoWrite;
 
 use crate::pgp::*;
 
@@ -316,4 +324,165 @@ pub fn sha256sum(text: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(text);
     base64::encode(hasher.finalize())
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct SodiumKxEnDeCrypt {
+    peer_pk_b64: String,
+    tx_key_b64: String,
+    rx_key_b64: String,
+    my_pk_bytes: [u8; 32],
+    pub decrypt_tx: bool,
+}
+
+impl SodiumKxEnDeCrypt {
+    /// Create a session from your keypair and the peer's Base64 public key.
+    /// `is_client = true` for client side; `false` for server side.
+    pub fn new_from_keypair(
+        my_kx: &crypto_kx::KeyPair,
+        peer_pk_b64: &str,
+        is_client: bool,
+    ) -> Result<Self, String> {
+        // Decode peer pubkey
+        let peer_pk_vec = b64::STANDARD_NO_PAD
+            .decode(peer_pk_b64)
+            .or_else(|_| b64::STANDARD.decode(peer_pk_b64))
+            .map_err(|_| "invalid base64: peer_pk_b64")?;
+
+        if peer_pk_vec.len() != 32 {
+            return Err("peer_pk must be 32 bytes".into());
+        }
+
+        let mut peer_pk_arr = [0u8; 32];
+        peer_pk_arr.copy_from_slice(&peer_pk_vec);
+        let peer_pk = crypto_kx::PublicKey::from_bytes(&peer_pk_arr)
+            .map_err(|_| "peer public key invalid")?;
+
+        // Correct DH direction
+        let sess = if is_client {
+            crypto_kx::client_session_keys(&my_kx.public_key, &my_kx.secret_key, &peer_pk)
+        } else {
+            crypto_kx::server_session_keys(&my_kx.public_key, &my_kx.secret_key, &peer_pk)
+        }
+        .map_err(|_| "session key derivation failed")?;
+
+        let tx_key_b64 = b64::STANDARD_NO_PAD.encode(sess.tx);
+        let rx_key_b64 = b64::STANDARD_NO_PAD.encode(sess.rx);
+
+        let mut my_pk_bytes = [0u8; 32];
+        my_pk_bytes.copy_from_slice(my_kx.public_key.as_bytes());
+
+        Ok(Self {
+            peer_pk_b64: peer_pk_b64.to_owned(),
+            tx_key_b64,
+            rx_key_b64,
+            my_pk_bytes,
+            decrypt_tx: false,
+        })
+    }
+
+    pub fn my_public_key_b64(&self) -> String {
+        b64::STANDARD_NO_PAD.encode(&self.my_pk_bytes)
+    }
+
+    pub fn tx_key_b64(&self) -> &str {
+        &self.tx_key_b64
+    }
+
+    pub fn rx_key_b64(&self) -> &str {
+        &self.rx_key_b64
+    }
+
+    fn tx_key(&self) -> Result<aead::Key, String> {
+        let bytes = b64::STANDARD_NO_PAD
+            .decode(&self.tx_key_b64)
+            .or_else(|_| b64::STANDARD.decode(&self.tx_key_b64))
+            .map_err(|_| "invalid tx_key base64".to_string())?;
+        Ok(aead::Key::from_bytes(&bytes).map_err(|_| "invalid tx_key bytes".to_string())?)
+    }
+
+    fn rx_key(&self) -> Result<aead::Key, String> {
+        let bytes = b64::STANDARD_NO_PAD
+            .decode(&self.rx_key_b64)
+            .or_else(|_| b64::STANDARD.decode(&self.rx_key_b64))
+            .map_err(|_| "invalid rx_key base64".to_string())?;
+        Ok(aead::Key::from_bytes(&bytes).map_err(|_| "invalid rx_key bytes".to_string())?)
+    }
+
+    /// Serialize this struct to CBOR bytes, then Base64 (no padding) as String.
+    pub fn to_base64_cbor(&self) -> Result<String, String> {
+        let cbor = serde_cbor::to_vec(self).map_err(|e| format!("CBOR encode error: {e}"))?;
+        Ok(STANDARD_NO_PAD.encode(cbor))
+    }
+
+    /// Parse a Base64 (no-pad or padded) String, then CBOR-decode into Self.
+    pub fn from_base64_cbor(s: &str) -> Result<Self, String> {
+        let bytes = STANDARD_NO_PAD
+            .decode(s)
+            .or_else(|_| STANDARD.decode(s))
+            .map_err(|e| format!("Base64 decode error: {e}"))?;
+        serde_cbor::from_slice(&bytes).map_err(|e| format!("CBOR decode error: {e}"))
+    }
+}
+
+// === Traits ===
+
+impl Cryptical for SodiumKxEnDeCrypt {
+    fn get_public_key_as_base64(&self) -> String {
+        self.my_public_key_b64()
+    }
+
+    fn get_public_key_fingerprint(&self) -> String {
+        let bytes = &self.my_pk_bytes;
+        let mut s = String::with_capacity(2 * 8 + 1 + 2 * 4);
+        for b in &bytes[..8] {
+            let _ = write!(s, "{:02x}", b);
+        }
+        s.push('…');
+        for b in &bytes[28..] {
+            let _ = write!(s, "{:02x}", b);
+        }
+        s
+    }
+}
+
+impl CrypticalEncrypt for SodiumKxEnDeCrypt {
+    fn encrypt(&self, input: &str) -> Result<String, String> {
+        let key = self.tx_key()?;
+        let nonce = aead::Nonce::generate();
+        let ct = aead::encrypt(input.as_bytes(), None, &nonce, &key)
+            .map_err(|_| "aead encrypt failed".to_string())?;
+        let mut out = Vec::with_capacity(24 + ct.len());
+        out.extend_from_slice(nonce.as_bytes());
+        out.extend_from_slice(&ct);
+
+        Ok(b64::STANDARD_NO_PAD.encode(&out))
+    }
+}
+
+impl CrypticalDecrypt for SodiumKxEnDeCrypt {
+    fn decrypt(&self, input: &str) -> Result<String, String> {
+        let buf = b64::STANDARD_NO_PAD
+            .decode(input)
+            .or_else(|_| b64::STANDARD.decode(input))
+            .map_err(|_| "bad base64 input".to_string())?;
+
+        if buf.len() < 24 {
+            return Err("ciphertext too short".into());
+        }
+
+        let mut nonce_arr = [0u8; 24];
+        nonce_arr.copy_from_slice(&buf[..24]);
+        let nonce = aead::Nonce::from_bytes(nonce_arr);
+        let ct = &buf[24..];
+
+        let mut key = self.rx_key()?;
+        if self.decrypt_tx {
+            key = self.tx_key()?;
+        }
+        let pt =
+            aead::decrypt(ct, None, &nonce, &key).map_err(|_| "aead decrypt failed".to_string())?;
+
+        Ok(String::from_utf8(pt).map_err(|_| "utf8 error".to_string())?)
+    }
 }

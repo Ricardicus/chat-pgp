@@ -12,17 +12,17 @@ pub enum EncryptionType {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct InitMsg {
-    pub pub_key: String,
-    pub signature: String,
-    pub challenge: String,
+    pub pub_key_pgp: String,
+    pub pub_key_eph: String,
+    pub signature_pgp: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct InitOkMsg {
-    pub sym_key_encrypted: String,
-    pub pub_key: String,
-    pub orig_pub_key: String,
-    pub challenge_sig: String,
+    pub pub_key_pgp: String,
+    pub pub_key_eph: String,
+    pub signature: String,
+    pub orig_pub_key_pgp: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -245,30 +245,29 @@ pub trait MessagebleTopicAsyncPublishReads {
 }
 
 impl SessionMessage {
-    pub fn new_init(pub_key: String, signature: String, challenge: &mut String) -> Self {
-        *challenge = generate_random_string(challenge_len());
+    pub fn new_init(pub_key_pgp: String, pub_key_eph: String, signature_pgp: String) -> Self {
         SessionMessage {
             message: MessageData::Init(InitMsg {
-                pub_key,
-                signature,
-                challenge: challenge.clone(),
+                pub_key_pgp,
+                pub_key_eph,
+                signature_pgp,
             }),
             session_id: "".to_string(),
         }
     }
 
     pub fn new_init_ok(
-        sym_key_encrypted: String,
-        pub_key: String,
-        orig_pub_key: String,
-        challenge_sig: String,
+        pub_key_pgp: String,
+        pub_key_eph: String,
+        signature: String,
+        orig_pub_key_pgp: String,
     ) -> Self {
         SessionMessage {
             message: MessageData::InitOk(InitOkMsg {
-                sym_key_encrypted,
-                pub_key,
-                orig_pub_key,
-                challenge_sig,
+                pub_key_pgp,
+                pub_key_eph,
+                signature,
+                orig_pub_key_pgp,
             }),
             session_id: "".to_string(),
         }
@@ -400,8 +399,8 @@ impl SessionMessage {
 
     pub fn to_string(&self) -> String {
         match &self.message {
-            MessageData::Init(msg) => msg.pub_key.clone(),
-            MessageData::InitOk(msg) => msg.sym_key_encrypted.clone(),
+            MessageData::Init(msg) => msg.pub_key_pgp.clone(),
+            MessageData::InitOk(msg) => msg.orig_pub_key_pgp.clone(),
             MessageData::Close(msg) => msg.session_id.clone(),
             MessageData::Chat(msg) => msg.message.clone(),
             MessageData::Encrypted(msg) => msg.data.clone(),
