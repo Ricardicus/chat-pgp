@@ -1,3 +1,4 @@
+use super::crypto::{CrypticalDecrypt, CrypticalEncrypt};
 use crate::session::messages::SessionMessage;
 use crate::util::get_current_datetime;
 use serde::{Deserialize, Serialize};
@@ -15,7 +16,8 @@ pub struct SessionLogMessage {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct SessionLog {
     pub session_id: String,
-    pub encrypted_session_key: String,
+    pub pub_key_pgp: String,
+    pub cipher_serialized_encrypted: String,
     pub last_active: String,
     pub others: Vec<String>,
     pub messages: Vec<SessionLogMessage>,
@@ -62,12 +64,14 @@ impl Memory {
     pub fn new_entry(
         &mut self,
         session_id: String,
-        encrypted_session_key: String,
+        pub_key_pgp: String,
+        cipher_serialized_encrypted: String,
         others: Vec<String>,
     ) {
         let session_log = SessionLog {
             session_id: session_id.clone(),
-            encrypted_session_key,
+            pub_key_pgp,
+            cipher_serialized_encrypted,
             messages: Vec::new(),
             others,
             last_active: get_current_datetime(),
@@ -112,9 +116,12 @@ impl Memory {
         }
     }
 
-    pub fn get_encrypted_sym_key(&self, session_id: &str) -> Result<String, ()> {
+    pub fn get_encrypted_cipher(&self, session_id: &str) -> Result<(String, String), ()> {
         match self.session_log.get(session_id) {
-            Some(entry) => Ok(entry.encrypted_session_key.clone()),
+            Some(entry) => Ok((
+                entry.cipher_serialized_encrypted.clone(),
+                entry.pub_key_pgp.clone(),
+            )),
             None => Err(()),
         }
     }
@@ -148,10 +155,11 @@ impl Memory {
     pub fn get_session_log(
         &self,
         session_id: &str,
-    ) -> Result<(String, Vec<SessionLogMessage>), ()> {
+    ) -> Result<(String, String, Vec<SessionLogMessage>), ()> {
         if let Some(session_log) = self.session_log.get(session_id) {
             Ok((
-                session_log.encrypted_session_key.clone(),
+                session_log.pub_key_pgp.clone(),
+                session_log.cipher_serialized_encrypted.clone(),
                 session_log.messages.clone(),
             ))
         } else {

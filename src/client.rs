@@ -4,7 +4,8 @@ mod session;
 use crate::session::messages::MessageData::{Chat, Encrypted};
 use serde::{Deserialize, Serialize};
 use session::crypto::{
-    ChaCha20Poly1305EnDeCrypt, Cryptical, CrypticalID, PGPEnCryptOwned, PGPEnDeCrypt,
+    ChaCha20Poly1305EnDeCrypt, Cryptical, CrypticalDecrypt, CrypticalEncrypt, CrypticalID,
+    PGPEnCryptOwned, PGPEnDeCrypt, SodiumKxEnDeCrypt,
 };
 use session::messages::{MessagingError, SessionMessage};
 use session::protocol::*;
@@ -18,6 +19,10 @@ use std::process::exit;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex, OnceCell};
 use tokio::time::{timeout, Duration};
+
+use base64::{engine::general_purpose as b64, Engine as _};
+use libsodium_rs::{crypto_aead::xchacha20poly1305 as aead, crypto_kx};
+use std::error::Error;
 
 use crate::session::middleware::ZenohHandler;
 use zenoh::Config;
@@ -605,7 +610,7 @@ async fn terminate(session_tx: mpsc::Sender<(String, String)>) {
 async fn launch_terminal_program(
     cert: Arc<Cert>,
     session_tx: mpsc::Sender<(String, String)>,
-    mut session: Session<ChaCha20Poly1305EnDeCrypt, PGPEnDeCrypt>,
+    mut session: Session<SodiumKxEnDeCrypt, PGPEnDeCrypt>,
 ) -> Result<(), ()> {
     let pipe = PIPE.get().unwrap().clone();
     let zc = session.middleware_config.clone();
@@ -969,75 +974,143 @@ async fn launch_terminal_program(
                                 println_message_str(1, "Sorry. This did not work ¯\\_(ツ)_/¯... ")
                                     .await;
                             } else {
-                                let (encrypted_sym_key, logs) = session_log.unwrap();
+                                let (pub_key_pgp, cipher_serialized_encrypted, logs) =
+                                    session_log.unwrap();
+
+                                let pub_key_dec =
+                                    base64::decode(&pub_key_pgp).expect("Failed to decode pub_key");
+                                let cert = read_from_vec(&pub_key_dec);
+                                if cert.is_err() {
+                                    println_message_str(
+                                    1,
+                                    "Failed to decrypting stored encrypted session key... Sorry!",
+                                    ).await;
+                                    continue;
+                                }
+                                let cert = cert.unwrap();
+                                let fingerprint = cert.fingerprint().to_string();
+
+                                // Check that we match the fingerprint
+                                if fingerprint != session.get_fingerprint().await {
+                                    println_message_str(
+                                        1,
+                                        "Sorry. Cannot read that memory.. Perhaps you were using a different PGP key?"
+                                    )
+                                    .await;
+                                    continue;
+                                }
+
                                 println_message_str(
                                     1,
                                     "Decrypting stored encrypted session key...",
                                 )
                                 .await;
-                                let sym_key =
-                                    session.decrypt_encrypted_str(encrypted_sym_key).await;
 
-                                if sym_key.is_ok() {
-                                    println_message_str(1, "Restored session key.").await;
-                                    println_message_str(1, "Decrypting memory.").await;
-                                    let sym_key = sym_key.unwrap();
-                                    for logmsg in logs {
-                                        let msg = logmsg.message;
-                                        let read = logmsg.read;
-                                        match msg.message {
-                                            Encrypted(msg) => {
-                                                let hidden_msg = session
-                                                    .decrypt_sym_encrypted_msg(
-                                                        sym_key.clone(),
-                                                        msg.data.clone(),
-                                                    )
-                                                    .await;
-                                                if hidden_msg.is_ok() {
-                                                    let msg = hidden_msg.unwrap();
-                                                    match msg.message {
-                                                        Chat(msg) => {
-                                                            if read {
-                                                                println_message_style(
-                                                                    1,
-                                                                    format!(
-                                                                        "[{}] {} ({}) - {}",
-                                                                        msg.date_time,
-                                                                        msg.sender_userid,
-                                                                        short_fingerprint(
-                                                                            &msg.sender_fingerprint
-                                                                        ),
-                                                                        msg.message
-                                                                    ),
-                                                                    TextStyle::Bold,
-                                                                    TextColor::White,
-                                                                )
-                                                                .await;
-                                                            } else {
-                                                                println_message(
-                                                                    1,
-                                                                    format!(
-                                                                        "[{}] {} ({})- {}",
-                                                                        msg.date_time,
-                                                                        msg.sender_userid,
-                                                                        short_fingerprint(
-                                                                            &msg.sender_fingerprint
-                                                                        ),
-                                                                        msg.message
-                                                                    ),
-                                                                )
-                                                                .await;
+                                let cipher_old_serialized = session
+                                    .decrypt_encrypted_str(cipher_serialized_encrypted)
+                                    .await;
+                                if cipher_old_serialized.is_ok() {
+                                    let cipher_old_serialized = cipher_old_serialized.unwrap();
+                                    let cipher_old =
+                                        SodiumKxEnDeCrypt::from_base64_cbor(&cipher_old_serialized);
+                                    if cipher_old.is_ok() {
+                                        // Successfully decrypted the old cipher
+                                        println_message_str(
+                                            1,
+                                            "Old session cipher decrypted and retrieved...",
+                                        )
+                                        .await;
+                                        println_message_str(1, "Decrypting memory.").await;
+                                        let mut cipher_old = cipher_old.unwrap();
+
+                                        for logmsg in logs {
+                                            let msg = logmsg.message;
+                                            let read = logmsg.read;
+                                            cipher_old.decrypt_tx = false;
+                                            match msg.message {
+                                                Encrypted(msg) => {
+                                                    let decrypted = match cipher_old
+                                                        .decrypt(&msg.data)
+                                                    {
+                                                        Ok(res) => res,
+                                                        Err(_) => {
+                                                            // Toggle decrypt_tx test again
+                                                            cipher_old.decrypt_tx = true;
+
+                                                            match cipher_old.decrypt(&msg.data) {
+                                                                Ok(res) => res,
+                                                                Err(_) => {
+                                                                    println_message_str(
+                                                                        1,
+                                                                        "Error decrypting message with old session cipher... Sorry!",
+                                                                    )
+                                                                    .await;
+                                                                    "Error".to_owned()
+                                                                }
                                                             }
                                                         }
-                                                        _ => {}
-                                                    }
+                                                    };
+                                                    match SessionMessage::deserialize(&decrypted) {
+                                                        Ok(msg) => match msg.message {
+                                                            Chat(msg) => {
+                                                                if read {
+                                                                    println_message_style(
+                                                                            1,
+                                                                            format!(
+                                                                                "[{}] {} ({}) - {}",
+                                                                                msg.date_time,
+                                                                                msg.sender_userid,
+                                                                                short_fingerprint(
+                                                                                    &msg.sender_fingerprint
+                                                                                ),
+                                                                                msg.message
+                                                                            ),
+                                                                            TextStyle::Bold,
+                                                                            TextColor::White,
+                                                                        )
+                                                                        .await;
+                                                                } else {
+                                                                    println_message(
+                                                                            1,
+                                                                            format!(
+                                                                                "[{}] {} ({})- {}",
+                                                                                msg.date_time,
+                                                                                msg.sender_userid,
+                                                                                short_fingerprint(
+                                                                                    &msg.sender_fingerprint
+                                                                                ),
+                                                                                msg.message
+                                                                            ),
+                                                                        )
+                                                                        .await;
+                                                                }
+                                                            }
+                                                            _ => {}
+                                                        },
+                                                        Err(_) => {
+                                                            println_message_str(
+                                                                1,
+                                                                "Failed to parse message in memory... Sorry!",
+                                                            )
+                                                            .await;
+                                                        }
+                                                    };
                                                 }
+                                                _ => {}
                                             }
-                                            _ => {}
                                         }
+                                    } else {
+                                        println_message_str(
+                                            1,
+                                            "Failed to decrypt stored encrypted session cipher... cbor base64 error.. Sorry!",
+                                        )
+                                        .await;
                                     }
                                 } else {
-                                    println_message_str(1, "Sorry. Cannot read that memory.. Perhaps you were using a different PGP key?")
+                                    println_message_str(
+                                        1,
+                                        "Failed to decrypt stored encrypted session cipher... Sorry!",
+                                    )
                                     .await;
                                 }
                             }
