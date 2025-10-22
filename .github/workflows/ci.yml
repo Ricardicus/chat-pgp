@@ -2,53 +2,84 @@ name: Rust CI
 
 on:
   push:
-    branches:
-      - master 
+    branches: [ master ]
   pull_request:
-    branches:
-      - master
+    branches: [ master ]
 
 jobs:
   build-and-test:
-
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v3
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-    - name: Install dependencies
-      run: sudo apt-get update && sudo apt-get install -y clang llvm pkg-config nettle-dev libncurses5-dev libncursesw5-dev xvfb
+      # (Optional but recommended) checkout zenoh from a specific tag for reproducibility
+      - name: Checkout zenoh
+        uses: actions/checkout@v4
+        with:
+          repository: eclipse-zenoh/zenoh
+          # ref: v0.11.0 # <- pin a tag/commit if you want
+          path: zenoh-src
 
-    - name: Set up Rust
-      uses: actions-rs/toolchain@v1
-      with:
-        toolchain: stable
-        override: true
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y clang llvm pkg-config nettle-dev libncurses5-dev libncursesw5-dev xvfb
 
-    - name: Cache cargo registry
-      uses: actions/cache@v3
-      with:
-        path: ~/.cargo/registry
-        key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
-        restore-keys: |
-          ${{ runner.os }}-cargo-registry-
+      - name: Set up Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
 
-    - name: Cache cargo index
-      uses: actions/cache@v3
-      with:
-        path: ~/.cargo/git
-        key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
-        restore-keys: |
-          ${{ runner.os }}-cargo-index-
+      - name: Cache cargo registry
+        uses: actions/cache@v3
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
 
-    - name: Build the project
-      run: cargo build --release
+      - name: Cache cargo index
+        uses: actions/cache@v3
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-index-
 
-    - name: Run tests with xvfb-run
-      env:
-        TERM: xterm-256color
-      run: |
-        xvfb-run -a ./target/release/client --test-receiver &
-        sleep 1
-        xvfb-run -a ./target/release/client --test-sender
+      # Build zenohd
+      - name: Build zenohd
+        working-directory: zenoh-src
+        run: cargo build --release -p zenohd
+
+      # Start zenohd in background
+      - name: Start zenohd
+        working-directory: zenoh-src
+        run: |
+          ./target/release/zenohd > $GITHUB_WORKSPACE/zenohd.log 2>&1 &
+          echo $! > $GITHUB_WORKSPACE/zenohd.pid
+          sleep 2
+          echo "zenohd started (pid=$(cat $GITHUB_WORKSPACE/zenohd.pid))"
+
+      - name: Build the project
+        run: cargo build --release
+
+      - name: Run tests with xvfb-run
+        env:
+          TERM: xterm-256color
+        run: |
+          xvfb-run -a ./target/release/client -z zenoh/config-localhost.json5 --test-receiver &
+          sleep 1
+          xvfb-run -a ./target/release/client -z zenoh/config-localhost.json5 --test-sender
+
+      # Always try to stop zenohd, even if tests failed
+      - name: Stop zenohd
+        if: always()
+        run: |
+          if [ -f "$GITHUB_WORKSPACE/zenohd.pid" ]; then
+            kill "$(cat $GITHUB_WORKSPACE/zenohd.pid)" || true
+            sleep 1
+            pkill -f zenohd || true
+          fi
+          echo "--- zenohd log tail ---"
+          tail -n 200 "$GITHUB_WORKSPACE/zenohd.log" || true
