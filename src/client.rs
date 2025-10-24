@@ -517,6 +517,7 @@ async fn cb_discovered(public_key: String) -> bool {
 async fn cb_terminate() {}
 
 async fn cb_init_declined(public_key: String, _message: String) {
+    println_message(1, "They declined".to_string()).await;
     let pub_key_decoded = match base64::decode(public_key) {
         Err(_) => {
             return;
@@ -726,8 +727,10 @@ async fn launch_terminal_program(
                             )
                             .await;
                         } else {
-                            println_message_str(1, "-- Declined this chat request.").await;
-                            let _ = session.decline_pending_request(&session_id).await;
+                            println_message_str(1, "-- You declined this chat request.").await;
+                            let _ = session
+                                .decline_pending_request(&session_id, &zenoh_handler)
+                                .await;
                         }
                     }
                     _ => {}

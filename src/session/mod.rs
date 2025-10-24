@@ -3,8 +3,10 @@ use regex::Regex;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fs;
 use std::fs::File;
 use std::io::{self, Read, Write};
+use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -19,7 +21,7 @@ pub mod middleware;
 pub mod protocol;
 
 use crate::pgp::pgp::read_from_vec;
-use crate::util::{get_current_datetime, RingBuffer};
+use crate::util::{base64_pub_key_to_fingerprint, get_current_datetime, RingBuffer};
 use async_recursion::async_recursion;
 use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD};
 use base64::{engine::general_purpose as b64, Engine as _};
@@ -39,10 +41,10 @@ use messages::MessageData::{
 use messages::MessagingError::*;
 use messages::SessionMessage as Message;
 use messages::{
-    ChatMsg, DiscoveryMsg, DiscoveryReplyMsg, EmailMsg, EncryptedMsg, EncryptedRelayMsg, InitMsg,
-    InitOkMsg, InternalMsg, MessageData, MessageListener, MessagebleTopicAsync,
-    MessagebleTopicAsyncPublishReads, MessagebleTopicAsyncReadTimeout, MessagingError,
-    SessionErrorCodes, SessionErrorMsg,
+    ChatMsg, DiscoveryMsg, DiscoveryReplyMsg, EmailMsg, EncryptedMsg, EncryptedRelayMsg,
+    InitDeclineMsg, InitMsg, InitOkMsg, InternalMsg, MessageData, MessageListener,
+    MessagebleTopicAsync, MessagebleTopicAsyncPublishReads, MessagebleTopicAsyncReadTimeout,
+    MessagingError, SessionErrorCodes, SessionErrorMsg,
 };
 use middleware::ZenohHandler;
 use protocol::*;
@@ -167,6 +169,27 @@ where
     running: Arc<Mutex<bool>>,
 }
 
+fn ensure_dir(dir: &str) -> io::Result<()> {
+    let p = Path::new(dir);
+
+    match fs::metadata(p) {
+        // already a directory: nothing to do
+        Ok(meta) if meta.is_dir() => Ok(()),
+
+        // something exists but it's not a dir: surface a clear error
+        Ok(_) => Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "'.state' exists but is not a directory",
+        )),
+
+        // doesn't exist: create it in the current working directory
+        Err(e) if e.kind() == io::ErrorKind::NotFound => fs::create_dir(p),
+
+        // other I/O errors
+        Err(e) => Err(e),
+    }
+}
+
 impl Session<SodiumKxEnDeCrypt, PGPEnDeCrypt> {
     pub fn new(
         host_encro: PGPEnDeCrypt,
@@ -177,8 +200,10 @@ impl Session<SodiumKxEnDeCrypt, PGPEnDeCrypt> {
         let (tx, rx) = mpsc::channel(100);
         let (tx_chat, rx_chat) = mpsc::channel(100);
         let fingerprint = host_encro.get_public_key_fingerprint();
-        let memory_file = &format!(".memory_{}", fingerprint);
-        let inbox_file = &format!(".inbox_{}", fingerprint);
+        let state_dir = ".state";
+        let _ = ensure_dir(state_dir);
+        let memory_file = &format!("{}/.memory_{}", state_dir, fingerprint);
+        let inbox_file = &format!("{}/.inbox_{}", state_dir, fingerprint);
         if relay {
             println!("relay session");
         }
@@ -271,13 +296,39 @@ impl Session<SodiumKxEnDeCrypt, PGPEnDeCrypt> {
         None
     }
 
-    pub async fn decline_pending_request(&mut self, session_id: &str) -> Result<(), ()> {
+    pub async fn decline_pending_request(
+        &mut self,
+        session_id: &str,
+        zenoh_handler: &ZenohHandler,
+    ) -> Result<(), ()> {
         let mut requests = self.requests_incoming_initialization.lock().await;
         let mut index = None;
 
         for (i, (session_data, _, _)) in requests.iter().enumerate() {
             let id = session_data.id.clone();
             if id == session_id {
+                let other_pub_key = session_data.pub_key.clone();
+
+                let fingerprint = base64_pub_key_to_fingerprint(&other_pub_key);
+                if fingerprint.is_err() {
+                    return Err(());
+                }
+                let fingerprint = fingerprint.unwrap();
+                let mut topic = Topic::Initialize.as_str().to_string();
+                topic.push_str("/");
+                topic.push_str(&fingerprint);
+
+                // Send decline message
+                let msg_decline = Message::new_from_data(
+                    session_id.to_string(),
+                    MessageData::InitDecline(InitDeclineMsg {
+                        pub_key: self.host_encro.lock().await.get_public_key_as_base64(),
+                        message: "Declined by user".to_string(),
+                    }),
+                );
+
+                let _ = zenoh_handler.send_message(&topic, msg_decline).await;
+
                 requests.remove(i); // Remove the request while the lock is still active
                 index = Some(i);
                 break;
@@ -1017,9 +1068,11 @@ impl Session<SodiumKxEnDeCrypt, PGPEnDeCrypt> {
             self.launch_replay_request(responder.clone()).await;
         }
         let keep_running = self.running.clone();
-        let relay_file = ".relay".to_string();
-        let mut relay = SessionRelay::from_file(&relay_file)
-            .unwrap_or_else(|_| SessionRelay::new(relay_file, 54, 124));
+        let state_dir = ".state";
+        let _ = ensure_dir(state_dir);
+        let relay_file = &format!("{}/.relay", state_dir).to_string();
+        let mut relay = SessionRelay::from_file(relay_file)
+            .unwrap_or_else(|_| SessionRelay::new(relay_file.to_string(), 54, 124));
         let duration_wait = 60;
         let mut relay_last_stored = Utc::now();
         while *keep_running.lock().await {
@@ -2092,14 +2145,14 @@ impl Session<SodiumKxEnDeCrypt, PGPEnDeCrypt> {
         self.memory.lock().await.get_session_log(session_id)
     }
 
-    fn extract_subject(content: &str) -> String {
+    fn extract_subject(content: &str) -> Result<String, ()> {
         let subject_regex = Regex::new(r"(?i)subject:\s*(.*)").unwrap(); // (?i) makes it case-insensitive
         if let Some(captures) = subject_regex.captures(content) {
             captures
                 .get(1) // Get the first capturing group, which is the "[the rest of the line]"
-                .map_or("No subject".to_string(), |m| m.as_str().to_string())
+                .map_or(Err(()), |m| Ok(m.as_str().to_string()))
         } else {
-            "No subject".to_string()
+            Err(())
         }
     }
 
@@ -2110,20 +2163,28 @@ impl Session<SodiumKxEnDeCrypt, PGPEnDeCrypt> {
         gateway: &T,
     ) -> Result<(), ()> {
         let topic = Topic::email_topic(&session_id);
-        let subject = Self::extract_subject(&message);
+        let mut subject = Self::extract_subject(&message);
+        let mut message = message.clone();
+        if subject.is_err() {
+            subject = Ok("No Subject".to_string());
+        } else {
+            // Remove the Subject line from the message
+            let subject_line_regex = Regex::new(r"(?i)^subject:.*\n?").unwrap();
+            let message_cleaned = subject_line_regex.replace(&message, "").to_string();
+            message = message_cleaned;
+        }
+        let subject = subject.unwrap();
 
         let session_cipher_old = self.memory.lock().await.get_encrypted_cipher(&session_id);
         if session_cipher_old.is_ok() {
             // decrypt the encrypted symmetrical key
             let (session_cipher_old, pub_key_pgp) = session_cipher_old.unwrap();
 
-            let pub_key_dec = base64::decode(&pub_key_pgp).expect("Failed to decode pub_key");
-            let cert = read_from_vec(&pub_key_dec);
-            if cert.is_err() {
+            let fingerprint = base64_pub_key_to_fingerprint(&pub_key_pgp);
+            if fingerprint.is_err() {
                 return Err(());
             }
-            let cert = cert.unwrap();
-            let fingerprint = cert.fingerprint().to_string();
+            let fingerprint = fingerprint.unwrap();
 
             // Check that we used the same fingerprint here
             if self.host_encro.lock().await.get_public_key_fingerprint() == fingerprint {

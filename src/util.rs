@@ -1,3 +1,4 @@
+use crate::pgp::pgp::read_from_vec;
 use rand::distributions::Alphanumeric;
 use rand::{thread_rng, Rng};
 use serde::{Deserialize, Serialize};
@@ -41,6 +42,20 @@ pub fn execute_command(command: &str) -> Result<String, String> {
         }
         Err(stderr)
     }
+}
+
+pub fn base64_pub_key_to_fingerprint(pub_key_b64: &str) -> Result<String, ()> {
+    let pub_key_dec = base64::decode(&pub_key_b64);
+    if pub_key_dec.is_err() {
+        return Err(());
+    }
+    let pub_key_dec = pub_key_dec.unwrap();
+    let cert = read_from_vec(&pub_key_dec);
+    if cert.is_err() {
+        return Err(());
+    }
+    let cert = cert.unwrap();
+    Ok(cert.fingerprint().to_string())
 }
 
 pub fn short_fingerprint(fingerprint: &str) -> String {
